@@ -275,6 +275,30 @@ const STORAGE_KEY = 'derkav_checklist_app_v3';
 const SESSION_KEY = 'derkav_checklist_session_v3';
 const APP_VERSION = 3;
 
+// =====================================================================
+// پیکربندی پیش‌فرض اتصال ابری (اختیاری، اما شدیداً توصیه می‌شود)
+// =====================================================================
+// اگر پیش از انتشار این فایل (مثلاً روی GitHub Pages) این دو مقدار را همین‌جا
+// پر کنید، همه‌ی کاربران و دستگاه‌ها (کامپیوتر، گوشی، هر مرورگری) به‌طور
+// خودکار به همان یک پایگاه ابری مشترک روی Google Drive وصل می‌شوند — بدون
+// این‌که لازم باشد کسی آدرس یا کلید را دستی در تنظیمات وارد کند. حساب‌ها،
+// تجهیزات، قالب‌ها و سوابقی که روی یک دستگاه ساخته می‌شوند، همان لحظه (یا با
+// اولین ورود) روی بقیه‌ی دستگاه‌ها هم در دسترس خواهند بود.
+// اگر این دو مقدار را خالی بگذارید، برنامه مثل قبل کاملاً محلی (فقط همان
+// مرورگر) کار می‌کند و هرکسی باید URL/کلید را خودش در «تنظیمات» وارد کند.
+const DEFAULT_APPS_SCRIPT_URL = ''; // نمونه: 'https://script.google.com/macros/s/AKfycb.../exec'
+const DEFAULT_CLOUD_API_KEY = '';   // همان مقداری که در Script Properties با نام API_KEY ثبت کردید
+
+// آدرس/کلید مؤثر برای هر عملیات ابری: اگر کاربر در تنظیمات مقداری وارد کرده
+// باشد همان اولویت دارد؛ در غیر این صورت از مقدار پیش‌فرض بالا استفاده می‌شود.
+function resolveCloudConfig(settings) {
+  const s = settings || {};
+  return {
+    url: String((s.googleAppsScriptUrl || DEFAULT_APPS_SCRIPT_URL) || '').trim(),
+    apiKey: String((s.cloudApiKey || DEFAULT_CLOUD_API_KEY) || '').trim(),
+  };
+}
+
 const DEFAULT_CATEGORIES = ['برق', 'مکانیک', 'ایمنی و آتش‌نشانی', 'عمومی'];
 
 function makeDefaultTemplate() {
@@ -331,9 +355,9 @@ async function makeDefaultData() {
       logoDataUrl: '',
       managerPinHash: pinHash,
       passThreshold: 80,
-      googleAppsScriptUrl: '',
+      googleAppsScriptUrl: DEFAULT_APPS_SCRIPT_URL,
       googleClientId: '',
-      cloudApiKey: '',
+      cloudApiKey: DEFAULT_CLOUD_API_KEY,
     },
   };
 }
@@ -377,6 +401,12 @@ function migrateData(data) {
   if (Array.isArray(data.users) && data.users.length && !data.users.some(u => u.role === 'admin')) {
     const target = data.users.find(u => u.username === 'admin') || data.users.find(u => u.role === 'manager') || data.users[0];
     if (target) target.role = 'admin';
+  }
+  // اگر آدرس/کلید ابری در این دستگاه هنوز خالی است، مقدار پیش‌فرضی که در خود
+  // فایل منتشرشده تنظیم شده (در صورت وجود) جایگزین می‌شود.
+  if (data.settings) {
+    if (!data.settings.googleAppsScriptUrl) data.settings.googleAppsScriptUrl = DEFAULT_APPS_SCRIPT_URL;
+    if (!data.settings.cloudApiKey) data.settings.cloudApiKey = DEFAULT_CLOUD_API_KEY;
   }
   return data;
 }
@@ -492,12 +522,32 @@ function DataProvider({ children }) {
     try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { return null; }
   });
   const [toast, setToast] = useState(null);
+  const [cloudBootstrapping, setCloudBootstrapping] = useState(false);
 
   useEffect(() => {
     (async () => {
       let raw = loadRawData();
-      if (!raw) raw = await makeDefaultData();
-      else raw = migrateData(raw);
+      if (!raw) {
+        // دستگاه/مرورگر کاملاً تازه است: اگر پایگاه ابری پیکربندی شده باشد
+        // (چه به‌صورت پیش‌فرض در خود فایل، چه قبلاً روی دستگاه دیگری تنظیم
+        // شده و اکنون در دسترس است)، ابتدا آخرین نسخه‌ی مشترک را می‌گیریم تا
+        // حساب‌ها و اطلاعاتی که روی سایر دستگاه‌ها ساخته شده همین‌جا هم فوراً
+        // در دسترس باشد؛ در غیر این صورت داده‌ی پیش‌فرض محلی ساخته می‌شود.
+        const { url, apiKey } = resolveCloudConfig({});
+        if (url) {
+          setCloudBootstrapping(true);
+          try {
+            const res = await callAppsScript(url, { cloudApiKey: apiKey }, { action: 'cloud_pull' });
+            if (res && res.data && Array.isArray(res.data.users) && res.data.users.length) {
+              raw = migrateData(res.data);
+            }
+          } catch (e) { /* بدون پایگاه ابری در دسترس؛ به داده‌ی پیش‌فرض محلی برمی‌گردیم */ }
+          setCloudBootstrapping(false);
+        }
+        if (!raw) raw = await makeDefaultData();
+      } else {
+        raw = migrateData(raw);
+      }
       setData(raw);
       setReady(true);
     })();
@@ -505,6 +555,22 @@ function DataProvider({ children }) {
 
   useEffect(() => {
     if (ready && data) persistData(data);
+  }, [data, ready]);
+
+  // ارسال خودکار (در پس‌زمینه) هر تغییری در داده‌ها به پایگاه ابری، در صورت
+  // پیکربندی بودن اتصال؛ این‌گونه لازم نیست کسی دستی دکمه‌ی «ارسال» را بزند.
+  useEffect(() => {
+    if (!ready || !data) return;
+    const { url, apiKey } = resolveCloudConfig(data.settings);
+    if (!url) return;
+    const t = setTimeout(() => {
+      callAppsScript(url, { cloudApiKey: apiKey }, {
+        action: 'cloud_push',
+        meta: { device: navigator.userAgent, at: new Date().toISOString() },
+        data,
+      }).catch(() => { /* ارسال پس‌زمینه؛ شکست آن کاربر را متوقف نمی‌کند */ });
+    }, 2000); // تأخیر کوتاه تا تغییرات پیاپی یک‌جا ارسال شوند
+    return () => clearTimeout(t);
   }, [data, ready]);
 
   const notify = useCallback((message, kind) => {
@@ -527,7 +593,23 @@ function DataProvider({ children }) {
 
   const login = useCallback(async (username, password) => {
     const hash = await sha256Hex(password);
-    const user = (data.users || []).find(u => u.username === username && u.active !== false);
+    let user = (data.users || []).find(u => u.username === username && u.active !== false);
+    if (!user || user.passwordHash !== hash) {
+      // ممکن است این حساب روی دستگاه دیگری ساخته شده و هنوز به این دستگاه
+      // نرسیده باشد؛ پیش از رد کردن ورود، یک تلاش خودکار برای دریافت آخرین
+      // نسخه از پایگاه ابری انجام می‌شود.
+      const { url, apiKey } = resolveCloudConfig(data.settings);
+      if (url) {
+        try {
+          const res = await callAppsScript(url, { cloudApiKey: apiKey }, { action: 'cloud_pull' });
+          if (res && res.data && Array.isArray(res.data.users) && res.data.users.length) {
+            const fresh = migrateData(res.data);
+            setData(fresh);
+            user = fresh.users.find(u => u.username === username && u.active !== false);
+          }
+        } catch (e) { /* بی‌صدا نادیده گرفته می‌شود؛ در نهایت خطای ورود عادی نمایش داده می‌شود */ }
+      }
+    }
     if (!user || user.passwordHash !== hash) return 'نام کاربری یا رمز عبور اشتباه است.';
     const sess = { userId: user.id, username: user.username, role: user.role, name: user.name };
     setSession(sess);
@@ -555,7 +637,7 @@ function DataProvider({ children }) {
       <div className="min-h-screen flex items-center justify-center bg-slate-100">
         <div className="text-center">
           <div className="w-10 h-10 mx-auto border-4 border-brand-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="mt-4 text-slate-500">در حال آماده‌سازی سامانه…</p>
+          <p className="mt-4 text-slate-500">{cloudBootstrapping ? 'در حال دریافت اطلاعات از پایگاه ابری…' : 'در حال آماده‌سازی سامانه…'}</p>
         </div>
       </div>
     );
@@ -2919,9 +3001,16 @@ function SettingsPage() {
       <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
         <h3 className="font-bold text-slate-800">هم‌گام‌سازی ابری چندکاربره/چنددستگاهی</h3>
         <p className="text-xs text-slate-400">
-          با این قابلیت می‌توانید کل اطلاعات برنامه (تجهیزات، قالب‌ها، کاربران و سوابق) را در یک فایل
-          مشترک روی Google Drive ذخیره و از دستگاه‌های دیگر دریافت کنید. پیش از «دریافت»، حتماً یک
-          نسخه پشتیبان محلی بگیرید چون داده‌های فعلی این دستگاه جایگزین می‌شود.
+          از لحظه‌ای که آدرس و کلید بالا را وارد و ذخیره کنید، هر تغییری در این دستگاه (کاربر،
+          تجهیز، قالب یا سابقه‌ی جدید) به‌طور خودکار و در پس‌زمینه به پایگاه ابری ارسال می‌شود؛ و
+          هر دستگاه تازه‌ای که با همین آدرس/کلید وارد شود، در همان اولین بار به‌طور خودکار آخرین
+          نسخه را دریافت می‌کند — نیازی به فشردن دکمه نیست. اگر ورود با نام کاربری/رمز درست انجام
+          نشود، برنامه پیش از نمایش خطا یک‌بار به‌طور خودکار تلاش می‌کند آخرین نسخه را از ابر
+          بگیرد (برای حسابی که ممکن است تازه روی دستگاه دیگری ساخته شده باشد).
+        </p>
+        <p className="text-xs text-slate-400">
+          دکمه‌های زیر برای هم‌گام‌سازی فوری/دستی هستند. پیش از «دریافت»، حتماً یک نسخه پشتیبان
+          محلی بگیرید چون داده‌های فعلی این دستگاه با نسخه‌ی ابری جایگزین می‌شود.
         </p>
         <div className="flex flex-wrap gap-2">
           <button onClick={doCloudPush} disabled={syncing} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50">
