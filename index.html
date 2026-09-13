@@ -1,0 +1,3437 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>سامانه چک‌لیست درکاو</title>
+
+<!-- فونت وزیرمتن -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@100..900&display=swap" rel="stylesheet" />
+
+<!-- Tailwind (Play CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  if (window.tailwind) tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: { vazir: ['Vazirmatn', 'Tahoma', 'sans-serif'] },
+        colors: {
+          brand: {
+            50: '#eef6ff', 100: '#d9eaff', 200: '#bcdaff', 300: '#8ec2ff',
+            400: '#589fff', 500: '#2f7dfa', 600: '#1c5fe0', 700: '#1a4bb5',
+            800: '#1c4092', 900: '#1c3775', 950: '#142250'
+          },
+          ok: { 50:'#eefdf3', 500:'#12b76a', 700:'#027a48' },
+          warn: { 50:'#fffaeb', 500:'#f79009', 700:'#b54708' },
+          danger: { 50:'#fef3f2', 500:'#f04438', 700:'#b42318' }
+        }
+      }
+    }
+  };
+</script>
+
+<!-- React + ReactDOM + Babel (in-browser JSX transform, no build step) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- QR: تولید وکتور SVG خالص -->
+<script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
+
+<!-- اسکنر دوربین زنده -->
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+<!-- خروجی اکسل چندبرگی -->
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  :root { color-scheme: light; }
+  html, body { font-family: 'Vazirmatn', Tahoma, sans-serif; }
+  * { -webkit-tap-highlight-color: transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #f1f5f9; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+  input[type="number"] { direction: ltr; text-align: right; }
+
+  .signature-canvas { touch-action: none; cursor: crosshair; }
+
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .no-print { display: none !important; }
+    .print-page { page-break-after: always; }
+    .print-page:last-child { page-break-after: auto; }
+  }
+
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgba(47,125,250,0.35); }
+    100% { box-shadow: 0 0 0 14px rgba(47,125,250,0); }
+  }
+  .scan-pulse { animation: pulse-ring 1.6s cubic-bezier(0.4,0,0.6,1) infinite; }
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .toast-in { animation: toast-in .18s ease-out; }
+</style>
+</head>
+<body class="font-vazir bg-slate-100 text-slate-800">
+<div id="root"></div>
+<div id="print-root"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext, Fragment } = React;
+
+/* ============================================================
+   ۰. توابع کمکی: هش SHA-256، اعداد فارسی، تاریخ شمسی
+   ============================================================ */
+
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function validatePasswordStrength(pw) {
+  if (!pw || pw.length < 6) return 'رمز عبور باید حداقل ۶ کاراکتر باشد.';
+  if (!/[0-9]/.test(toEnglishDigits(pw))) return 'رمز عبور باید حداقل یک رقم عددی داشته باشد.';
+  return null;
+}
+
+const FA_DIGITS = ['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
+const AR_DIGITS = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+function toEnglishDigits(str) {
+  if (str === null || str === undefined) return str;
+  str = String(str);
+  return str.replace(/[۰-۹]/g, d => FA_DIGITS.indexOf(d))
+             .replace(/[٠-٩]/g, d => AR_DIGITS.indexOf(d));
+}
+function toPersianDigits(str) {
+  if (str === null || str === undefined) return str;
+  return String(str).replace(/[0-9]/g, d => FA_DIGITS[+d]);
+}
+
+/* --- تبدیل تقویم میلادی <-> شمسی (الگوریتم استاندارد جلالی) --- */
+function div(a, b) { return Math.trunc(a / b); }
+function jalCal(jy) {
+  const breaks = [-61,9,38,199,426,686,756,818,1111,1181,1210,1635,2060,2097,2192,2262,2324,2394,2456,3178];
+  let bl = breaks.length, gy = jy + 621, leapJ = -14, jp = breaks[0], jm, jump = 0, leap, n, i;
+  if (jy < jp || jy >= breaks[bl - 1]) throw new Error('سال نامعتبر');
+  for (i = 1; i < bl; i += 1) {
+    jm = breaks[i];
+    jump = jm - jp;
+    if (jy < jm) break;
+    leapJ += div(jump, 33) * 8 + div(jump % 33, 4);
+    jp = jm;
+  }
+  n = jy - jp;
+  leapJ += div(n, 33) * 8 + div((n % 33) + 3, 4);
+  if ((jump % 33) === 4 && (jump - n) === 4) leapJ += 1;
+  const leapG = div(gy, 4) - div((div(gy, 100) + 1) * 3, 4) - 150;
+  const march = 20 + leapJ - leapG;
+  if ((jump - n) < 6) n = n - jump + div(jump + 4, 33) * 33;
+  leap = ((((n + 1) % 33) - 1) % 4);
+  if (leap === -1) leap = 4;
+  return { leap, gy, march };
+}
+function g2d(gy, gm, gd) {
+  let d = div((gy + div(gm - 8, 6) + 100100) * 1461, 4)
+    + div(153 * ((gm + 9) % 12) + 2, 5) + gd - 34840408;
+  d = d - div(div(gy + 100100 + div(gm - 8, 6), 100) * 3, 4) + 752;
+  return d;
+}
+function d2g(jdn) {
+  let j = 4 * jdn + 139361631;
+  j = j + div(div(4 * jdn + 183187720, 146097) * 3, 4) * 4 - 3908;
+  const i = div((j % 1461), 4) * 5 + 308;
+  const gd = div(i % 153, 5) + 1;
+  const gm = (div(i, 153) % 12) + 1;
+  const gy = div(j, 1461) - 100100 + div(8 - gm, 6);
+  return [gy, gm, gd];
+}
+function mod(a, b) { return a - b * Math.floor(a / b); }
+function toGregorian(jy, jm, jd) {
+  const r = jalCal(jy);
+  const jdn = g2d(r.gy, 3, r.march) + (jm - 1) * 31 - div(jm, 7) * (jm - 7) + jd - 1;
+  return d2g(jdn);
+}
+function toJalali(gy, gm, gd) {
+  const jdn = g2d(gy, gm, gd);
+  const gy0 = d2g(jdn)[0];
+  let jy = gy0 - 621;
+  const r = jalCal(jy);
+  const jdn1f = g2d(r.gy, 3, r.march);
+  let k = jdn - jdn1f, jm, jd;
+  if (k >= 0) {
+    if (k <= 185) return [jy, 1 + div(k, 31), mod(k, 31) + 1];
+    k -= 186;
+  } else {
+    jy -= 1;
+    k += 179;
+    if (r.leap === 1) k += 1;
+  }
+  jm = 7 + div(k, 30);
+  jd = mod(k, 30) + 1;
+  return [jy, jm, jd];
+}
+function pad2(n) { return String(n).padStart(2, '0'); }
+function gregorianToJalaliStr(dateObj) {
+  const [jy, jm, jd] = toJalali(dateObj.getFullYear(), dateObj.getMonth() + 1, dateObj.getDate());
+  return `${jy}/${pad2(jm)}/${pad2(jd)}`;
+}
+function nowJalaliDateTime() {
+  const d = new Date();
+  return `${gregorianToJalaliStr(d)} - ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function jalaliMonthName(m) {
+  const names = ['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'];
+  return names[m - 1];
+}
+function jalaliMonthLength(jy, jm) {
+  if (jm <= 6) return 31;
+  if (jm <= 11) return 30;
+  return jalCal(jy).leap === 1 ? 30 : 29;
+}
+
+/* ============================================================
+   ۱. تولید بارکد QR وکتور SVG خالص
+   ============================================================ */
+function buildQrSvgMarkup(text, opts) {
+  opts = opts || {};
+  const fg = opts.fg || '#0f172a';
+  const bg = opts.bg || '#ffffff';
+  const margin = opts.margin === undefined ? 2 : opts.margin;
+  let qr;
+  try {
+    qr = qrcode(0, 'H');
+    qr.addData(text);
+    qr.make();
+  } catch (e) {
+    qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+  }
+  const count = qr.getModuleCount();
+  const size = count + margin * 2;
+  let path = '';
+  for (let r = 0; r < count; r++) {
+    for (let c = 0; c < count; c++) {
+      if (qr.isDark(r, c)) {
+        path += `M${c + margin},${r + margin}h1v1h-1z `;
+      }
+    }
+  }
+  return `<svg viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" width="100%" height="100%">` +
+    `<rect x="0" y="0" width="${size}" height="${size}" fill="${bg}"/>` +
+    `<path d="${path}" fill="${fg}"/>` +
+    `</svg>`;
+}
+
+function svgMarkupToPngDataUrl(svgMarkup, pixelSize) {
+  return new Promise((resolve, reject) => {
+    try {
+      const px = pixelSize || 800;
+      const svgBlob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = px; canvas.height = px;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, px, px);
+        ctx.drawImage(img, 0, 0, px, px);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = reject;
+      img.src = url;
+    } catch (e) { reject(e); }
+  });
+}
+
+function downloadDataUrl(dataUrl, filename) {
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function makeScanUrl(assetId) {
+  const base = window.location.href.split('?')[0].split('#')[0];
+  return `${base}?scan=${encodeURIComponent(assetId)}`;
+}
+
+/* ============================================================
+   ۲. لایه ذخیره‌سازی (Store) — localStorage + هش‌سازی + مهاجرت
+   ============================================================ */
+const STORAGE_KEY = 'derkav_checklist_app_v3';
+const SESSION_KEY = 'derkav_checklist_session_v3';
+const APP_VERSION = 3;
+
+const DEFAULT_CATEGORIES = ['برق', 'مکانیک', 'ایمنی و آتش‌نشانی', 'عمومی'];
+
+function makeDefaultTemplate() {
+  return {
+    id: 'tpl-db-default',
+    name: 'بازرسی دوره‌ای تابلو برق',
+    category: 'برق',
+    archived: false,
+    passThreshold: 80,
+    items: [
+      { id: 'it-1', type: 'checkbox', label: 'درب تابلو سالم و قفل‌شونده است', weight: 10, critical: false },
+      { id: 'it-2', type: 'yesno', label: 'اتصال زمین (ارت) برقرار است؟', weight: 15, critical: true },
+      { id: 'it-3', type: 'yesno', label: 'نشانه‌های سوختگی یا بوی غیرعادی وجود ندارد؟', weight: 15, critical: true },
+      { id: 'it-4', type: 'rating', label: 'وضعیت کلی نظافت و مرتب بودن سیم‌کشی', weight: 10, critical: false, scaleMax: 5 },
+      { id: 'it-5', type: 'numeric', label: 'دمای سطح تابلو (درجه سانتی‌گراد)', weight: 0, critical: false },
+      { id: 'it-6', type: 'select', label: 'وضعیت کلی تابلو', weight: 10, critical: false, options: ['سالم', 'نیاز به بررسی', 'معیوب'] },
+      { id: 'it-7', type: 'text', label: 'ملاحظات و توضیحات تکمیلی', weight: 0, critical: false },
+      { id: 'it-8', type: 'checkbox', label: 'برچسب هشدار خطر برق نصب است', weight: 10, critical: false },
+    ],
+  };
+}
+
+function makeDefaultAssets() {
+  const arr = [];
+  for (let i = 1; i <= 20; i++) {
+    const code = `DB-${pad2(i)}`;
+    arr.push({
+      id: `asset-${code}`,
+      code,
+      name: `تابلو برق شماره ${toPersianDigits(i)}`,
+      location: 'در انتظار تعیین محل استقرار',
+      serial: '',
+      templateId: 'tpl-db-default',
+    });
+  }
+  return arr;
+}
+
+async function makeDefaultData() {
+  const adminHash = await sha256Hex('1234');
+  const pinHash = await sha256Hex('123456');
+  return {
+    version: APP_VERSION,
+    users: [
+      { id: 'u-admin', username: 'admin', passwordHash: adminHash, role: 'admin', name: 'مدیر سیستم', active: true },
+    ],
+    categories: DEFAULT_CATEGORIES.slice(),
+    templates: [makeDefaultTemplate()],
+    assets: makeDefaultAssets(),
+    assignments: [],
+    records: [],
+    settings: {
+      orgName: 'سازمان درکاو',
+      logoDataUrl: '',
+      managerPinHash: pinHash,
+      passThreshold: 80,
+      googleAppsScriptUrl: '',
+      googleClientId: '',
+      cloudApiKey: '',
+    },
+  };
+}
+
+function loadRawData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error('خطا در خواندن داده‌های ذخیره‌شده، داده خام نامعتبر است.', e);
+    return null;
+  }
+}
+
+let saveTimer = null;
+function persistData(data) {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.error('خطا در ذخیره‌سازی داده‌ها در localStorage', e);
+    }
+  }, 150); // جلوگیری از رقابت (race condition) نوشتن‌های پیاپی روی localStorage
+}
+
+function migrateData(data) {
+  if (!data.version || data.version < 3) {
+    data.version = APP_VERSION;
+    data.assignments = data.assignments || [];
+    data.settings = data.settings || {};
+    if (data.settings.passThreshold === undefined) data.settings.passThreshold = 80;
+    if (data.settings.googleAppsScriptUrl === undefined) data.settings.googleAppsScriptUrl = '';
+    if (data.settings.googleClientId === undefined) data.settings.googleClientId = '';
+    if (data.settings.cloudApiKey === undefined) data.settings.cloudApiKey = '';
+  }
+  // این بخش صرف‌نظر از نسخه همیشه اجرا می‌شود تا داده‌های قدیمی‌تر هم با نقش
+  // جدید «ادمین» سازگار شوند (پنل مدیریت کاربران/تنظیمات فقط برای این نقش است).
+  data.assignments = data.assignments || [];
+  if (Array.isArray(data.users) && data.users.length && !data.users.some(u => u.role === 'admin')) {
+    const target = data.users.find(u => u.username === 'admin') || data.users.find(u => u.role === 'manager') || data.users[0];
+    if (target) target.role = 'admin';
+  }
+  return data;
+}
+
+function validateBackupShape(data) {
+  if (!data || typeof data !== 'object') return 'فایل پشتیبان نامعتبر است.';
+  const required = ['users', 'assets', 'templates', 'records', 'settings'];
+  for (const k of required) {
+    if (!(k in data)) return `فیلد «${k}» در فایل پشتیبان یافت نشد.`;
+  }
+  if (!Array.isArray(data.users) || !Array.isArray(data.assets) || !Array.isArray(data.templates) || !Array.isArray(data.records)) {
+    return 'ساختار آرایه‌ای فایل پشتیبان معتبر نیست.';
+  }
+  return null;
+}
+
+/* ============================================================
+   ۳. موتور امتیازدهی چک‌لیست
+   ============================================================ */
+function scoreRecord(template, answers) {
+  let earned = 0, totalWeight = 0, criticalFail = false;
+  const details = [];
+  (template.items || []).forEach(item => {
+    const val = answers[item.id];
+    let itemEarned = null, itemMax = item.weight || 0;
+    if (item.type === 'checkbox') {
+      totalWeight += itemMax;
+      itemEarned = val ? itemMax : 0;
+      if (item.critical && !val) criticalFail = true;
+    } else if (item.type === 'yesno') {
+      totalWeight += itemMax;
+      itemEarned = val === 'بله' ? itemMax : 0;
+      if (item.critical && val === 'خیر') criticalFail = true;
+    } else if (item.type === 'rating') {
+      const max = item.scaleMax || 5;
+      totalWeight += itemMax;
+      const num = Number(toEnglishDigits(val)) || 0;
+      itemEarned = (num / max) * itemMax;
+    } else if (item.type === 'select' && item.correctValue) {
+      totalWeight += itemMax;
+      itemEarned = val === item.correctValue ? itemMax : 0;
+    } else {
+      itemEarned = null; // اطلاعاتی (عددی/متنی/انتخابی بدون مقدار صحیح) — در امتیاز محاسبه نمی‌شود
+    }
+    if (itemEarned !== null) earned += itemEarned;
+    details.push({ itemId: item.id, label: item.label, value: val, earned: itemEarned, max: itemMax, critical: !!item.critical });
+  });
+  const percent = totalWeight > 0 ? Math.round((earned / totalWeight) * 100) : 100;
+  let status;
+  if (criticalFail) status = 'ناموفق (حیاتی)';
+  else if (percent >= (template.passThreshold || 80)) status = 'موفق';
+  else status = 'ناموفق';
+  return { percent, status, criticalFail, details, totalWeight, earned };
+}
+
+function qualityLabel(percent) {
+  if (percent >= 95) return 'عالی';
+  if (percent >= 80) return 'خوب';
+  if (percent >= 60) return 'متوسط';
+  if (percent >= 40) return 'ضعیف';
+  return 'بحرانی';
+}
+
+/* ============================================================
+   ۴. Context سراسری داده و احراز هویت
+   ============================================================ */
+const DataContext = createContext(null);
+function useAppData() { return useContext(DataContext); }
+
+const ROLE_LABELS = {
+  admin: 'ادمین (دسترسی کامل)',
+  manager: 'مدیر',
+  inspector: 'بازرس',
+  approver: 'تأییدکننده',
+  viewer: 'مشاهده‌گر',
+};
+
+// صفحاتی که قابل واگذاری به‌صورت جداگانه به هر کاربر هستند (به‌جز کاربران/تنظیمات
+// که همیشه فقط مخصوص نقش «ادمین» می‌مانند و از این طریق قابل واگذاری نیستند).
+const ASSIGNABLE_PAGES = [
+  { key: 'dashboard', label: 'داشبورد' },
+  { key: 'runner', label: 'اجرای بازرسی' },
+  { key: 'assets', label: 'تجهیزات' },
+  { key: 'records', label: 'سوابق' },
+  { key: 'templates', label: 'قالب‌های چک‌لیست' },
+  { key: 'tasks', label: 'وظایف' },
+  { key: 'help', label: 'راهنما' },
+];
+
+const DEFAULT_PAGES_BY_ROLE = {
+  admin: ['dashboard', 'runner', 'assets', 'records', 'templates', 'tasks', 'users', 'settings', 'help'],
+  manager: ['dashboard', 'runner', 'assets', 'records', 'templates', 'tasks', 'help'],
+  inspector: ['dashboard', 'runner', 'assets', 'records', 'tasks', 'help'],
+  approver: ['dashboard', 'assets', 'records', 'tasks', 'help'],
+  viewer: ['dashboard', 'assets', 'records', 'help'],
+};
+
+// دسترسی نهایی هر کاربر به صفحات: نقش «ادمین» همیشه دسترسی کامل دارد؛ برای
+// بقیه‌ی نقش‌ها، در صورت تعریف فهرست اختصاصی (u.pages) همان معیار است، وگرنه
+// پیش‌فرض همان نقش اعمال می‌شود. صفحات «کاربران» و «تنظیمات» در هر صورت فقط
+// برای نقش «ادمین» فعال می‌شوند و از طریق این فهرست قابل واگذاری نیستند.
+function effectivePages(user) {
+  if (!user) return [];
+  if (user.role === 'admin') return DEFAULT_PAGES_BY_ROLE.admin.slice();
+  const base = (user.pages && user.pages.length) ? user.pages : (DEFAULT_PAGES_BY_ROLE[user.role] || []);
+  return base.filter(p => p !== 'users' && p !== 'settings');
+}
+
+function DataProvider({ children }) {
+  const [data, setData] = useState(null);
+  const [ready, setReady] = useState(false);
+  const [session, setSession] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { return null; }
+  });
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      let raw = loadRawData();
+      if (!raw) raw = await makeDefaultData();
+      else raw = migrateData(raw);
+      setData(raw);
+      setReady(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (ready && data) persistData(data);
+  }, [data, ready]);
+
+  const notify = useCallback((message, kind) => {
+    setToast({ message, kind: kind || 'info', id: Date.now() });
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3200);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const update = useCallback((fn) => {
+    setData(prev => {
+      const draft = JSON.parse(JSON.stringify(prev));
+      fn(draft);
+      return draft;
+    });
+  }, []);
+
+  const login = useCallback(async (username, password) => {
+    const hash = await sha256Hex(password);
+    const user = (data.users || []).find(u => u.username === username && u.active !== false);
+    if (!user || user.passwordHash !== hash) return 'نام کاربری یا رمز عبور اشتباه است.';
+    const sess = { userId: user.id, username: user.username, role: user.role, name: user.name };
+    setSession(sess);
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+    return null;
+  }, [data]);
+
+  const logout = useCallback(() => {
+    setSession(null);
+    sessionStorage.removeItem(SESSION_KEY);
+  }, []);
+
+  const verifyManagerPin = useCallback(async (pin) => {
+    const hash = await sha256Hex(pin);
+    return data && data.settings.managerPinHash === hash;
+  }, [data]);
+
+  const currentUser = useMemo(() => {
+    if (!data || !session) return null;
+    return (data.users || []).find(u => u.id === session.userId) || null;
+  }, [data, session]);
+
+  if (!ready || !data) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <div className="text-center">
+          <div className="w-10 h-10 mx-auto border-4 border-brand-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="mt-4 text-slate-500">در حال آماده‌سازی سامانه…</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <DataContext.Provider value={{ data, update, session, login, logout, currentUser, verifyManagerPin, notify }}>
+      {children}
+      {toast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[999] no-print toast-in">
+          <div className={
+            "px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium border " +
+            (toast.kind === 'error' ? "bg-danger-50 text-danger-700 border-danger-500/30" :
+             toast.kind === 'success' ? "bg-ok-50 text-ok-700 border-ok-500/30" :
+             "bg-white text-slate-700 border-slate-200")
+          }>
+            {toast.message}
+          </div>
+        </div>
+      )}
+    </DataContext.Provider>
+  );
+}
+
+/* ============================================================
+   ۵. صفحه ورود (Login Gate)
+   ============================================================ */
+function LoginScreen() {
+  const { login, data } = useAppData();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [showPw, setShowPw] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!username || !password) { setError('نام کاربری و رمز عبور را وارد کنید.'); return; }
+    setBusy(true);
+    setError('');
+    const err = await login(username.trim(), password);
+    setBusy(false);
+    if (err) setError(err);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-brand-950 via-brand-900 to-brand-800 p-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-6">
+          <div className="w-16 h-16 rounded-2xl bg-white/10 border border-white/20 mx-auto flex items-center justify-center mb-3">
+            <svg viewBox="0 0 24 24" className="w-8 h-8 text-white" fill="none" stroke="currentColor" strokeWidth="1.6">
+              <path d="M9 11l3 3L22 4" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+          <h1 className="text-white text-xl font-bold">سامانه چک‌لیست درکاو</h1>
+          <p className="text-brand-200 text-sm mt-1">بازرسی، ثبت و پیگیری تجهیزات</p>
+        </div>
+        <form onSubmit={submit} className="bg-white rounded-2xl shadow-2xl p-6 space-y-4">
+          <div>
+            <label className="block text-sm text-slate-600 mb-1.5">نام کاربری</label>
+            <input value={username} onChange={e => setUsername(e.target.value)} autoFocus
+              className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              placeholder="admin" />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-600 mb-1.5">رمز عبور</label>
+            <div className="relative">
+              <input type={showPw ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
+                className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 pl-10 outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+                placeholder="••••••" />
+              <button type="button" onClick={() => setShowPw(s => !s)} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs">
+                {showPw ? 'پنهان' : 'نمایش'}
+              </button>
+            </div>
+          </div>
+          {error && <div className="text-danger-700 bg-danger-50 border border-danger-500/20 rounded-lg px-3 py-2 text-sm">{error}</div>}
+          <button disabled={busy} type="submit"
+            className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white rounded-xl py-2.5 font-medium transition">
+            {busy ? 'در حال بررسی…' : 'ورود به سامانه'}
+          </button>
+          <p className="text-center text-xs text-slate-400 pt-1">حساب پیش‌فرض مدیر: admin / 1234 (پیشنهاد می‌شود پس از ورود تغییر یابد)</p>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۶. اجزای رابط کاربری مشترک
+   ============================================================ */
+function Modal({ open, onClose, title, children, wide }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 no-print flex items-center justify-center p-4 bg-slate-900/50" onMouseDown={onClose}>
+      <div onMouseDown={e => e.stopPropagation()}
+        className={"bg-white rounded-2xl shadow-2xl w-full max-h-[90vh] overflow-y-auto " + (wide ? "max-w-2xl" : "max-w-md")}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 sticky top-0 bg-white">
+          <h3 className="font-bold text-slate-800">{title}</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100">✕</button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({ open, title, message, danger, onConfirm, onCancel }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[60] no-print flex items-center justify-center p-4 bg-slate-900/50">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-5">
+        <h3 className="font-bold text-slate-800 mb-1.5">{title}</h3>
+        <p className="text-sm text-slate-500 mb-5">{message}</p>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+          <button onClick={onConfirm} className={"px-4 py-2 rounded-xl text-sm text-white " + (danger ? "bg-danger-500 hover:bg-danger-700" : "bg-brand-600 hover:bg-brand-700")}>تأیید</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children, hint }) {
+  return (
+    <div>
+      <label className="block text-sm text-slate-600 mb-1.5">{label}</label>
+      {children}
+      {hint && <p className="text-xs text-slate-400 mt-1">{hint}</p>}
+    </div>
+  );
+}
+
+const inputCls = "w-full border border-slate-300 rounded-xl px-3.5 py-2 outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 bg-white";
+
+function Badge({ children, tone }) {
+  const map = {
+    ok: "bg-ok-50 text-ok-700",
+    danger: "bg-danger-50 text-danger-700",
+    warn: "bg-warn-50 text-warn-700",
+    slate: "bg-slate-100 text-slate-600",
+    brand: "bg-brand-50 text-brand-700",
+  };
+  return <span className={"px-2.5 py-1 rounded-full text-xs font-medium " + (map[tone] || map.slate)}>{children}</span>;
+}
+
+function StatusBadge({ status }) {
+  if (status === 'موفق') return <Badge tone="ok">موفق</Badge>;
+  if (status === 'ناموفق (حیاتی)') return <Badge tone="danger">ناموفق (حیاتی) ⚠</Badge>;
+  return <Badge tone="warn">ناموفق</Badge>;
+}
+
+/* ============================================================
+   ۷. انتخابگر تاریخ شمسی (Persian Date Picker)
+   ============================================================ */
+function PersianDatePicker({ value, onChange, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const today = new Date();
+  const [ty, tm] = toJalali(today.getFullYear(), today.getMonth() + 1, today.getDate());
+  const parsed = useMemo(() => {
+    if (!value) return null;
+    const parts = toEnglishDigits(value).split('/').map(Number);
+    if (parts.length === 3 && !parts.some(isNaN)) return parts;
+    return null;
+  }, [value]);
+  const [viewY, setViewY] = useState(parsed ? parsed[0] : ty);
+  const [viewM, setViewM] = useState(parsed ? parsed[1] : tm);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDoc(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, []);
+
+  const monthLen = jalaliMonthLength(viewY, viewM);
+  const firstDow = useMemo(() => {
+    const [gy, gm, gd] = toGregorian(viewY, viewM, 1);
+    return new Date(gy, gm - 1, gd).getDay(); // 0=یکشنبه در ایران؟ در JS 0=Sunday
+  }, [viewY, viewM]);
+  // تبدیل به هفته شروع‌شونده از شنبه: JS Sunday=0..Saturday=6  =>  شنبه باید ستون اول باشد
+  const leading = (firstDow + 1) % 7;
+
+  const days = [];
+  for (let i = 0; i < leading; i++) days.push(null);
+  for (let d = 1; d <= monthLen; d++) days.push(d);
+
+  const pick = (d) => {
+    const str = `${viewY}/${pad2(viewM)}/${pad2(d)}`;
+    onChange(str);
+    setOpen(false);
+  };
+
+  const shiftMonth = (delta) => {
+    let m = viewM + delta, y = viewY;
+    if (m < 1) { m = 12; y -= 1; }
+    if (m > 12) { m = 1; y += 1; }
+    setViewM(m); setViewY(y);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <div className="relative">
+        <input
+          readOnly value={value ? toPersianDigits(value) : ''} onClick={() => setOpen(o => !o)}
+          placeholder={placeholder || 'انتخاب تاریخ'} dir="ltr"
+          className={inputCls + " cursor-pointer text-right"} />
+        <svg onClick={() => setOpen(o => !o)} className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 cursor-pointer" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+          <rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18" strokeLinecap="round" />
+        </svg>
+      </div>
+      {open && (
+        <div className="absolute z-40 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl p-3 w-72">
+          <div className="flex items-center justify-between mb-2">
+            <button type="button" onClick={() => shiftMonth(1)} className="w-8 h-8 rounded-lg hover:bg-slate-100">›</button>
+            <div className="font-medium text-sm">{jalaliMonthName(viewM)} {toPersianDigits(viewY)}</div>
+            <button type="button" onClick={() => shiftMonth(-1)} className="w-8 h-8 rounded-lg hover:bg-slate-100">‹</button>
+          </div>
+          <div className="grid grid-cols-7 text-center text-xs text-slate-400 mb-1">
+            {['ش','ی','د','س','چ','پ','ج'].map(d => <div key={d}>{d}</div>)}
+          </div>
+          <div className="grid grid-cols-7 gap-1">
+            {days.map((d, i) => (
+              <button type="button" key={i} disabled={!d} onClick={() => d && pick(d)}
+                className={"h-8 rounded-lg text-sm " + (!d ? "" : "hover:bg-brand-50 " + (parsed && parsed[0]===viewY && parsed[1]===viewM && parsed[2]===d ? "bg-brand-600 text-white hover:bg-brand-600" : ""))}>
+                {d ? toPersianDigits(d) : ''}
+              </button>
+            ))}
+          </div>
+          <button type="button" onClick={() => {
+              const [jy, jm, jd] = toJalali(today.getFullYear(), today.getMonth() + 1, today.getDate());
+              setViewY(jy); setViewM(jm);
+              const str = `${jy}/${pad2(jm)}/${pad2(jd)}`;
+              onChange(str);
+              setOpen(false);
+            }}
+            className="mt-2 w-full text-xs text-brand-600 hover:underline">انتخاب امروز</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   ۸. استودیوی تمام‌صفحه امضای دیجیتال
+   ============================================================ */
+function SignaturePad({ open, onClose, onSave, roleLabel, initialName, initialTitle }) {
+  const canvasRef = useRef(null);
+  const drawing = useRef(false);
+  const last = useRef({ x: 0, y: 0 });
+  const [color, setColor] = useState('#0f172a');
+  const [thickness, setThickness] = useState(3);
+  const [hasDrawn, setHasDrawn] = useState(false);
+  const [name, setName] = useState(initialName || '');
+  const [title, setTitle] = useState(initialTitle || '');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(initialName || '');
+    setTitle(initialTitle || '');
+    setHasDrawn(false);
+    setSaving(false);
+    const resize = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const parent = canvas.parentElement;
+      const ratio = window.devicePixelRatio || 1;
+      const prev = canvas.toDataURL ? (hasDrawn ? canvas.toDataURL() : null) : null;
+      canvas.width = parent.clientWidth * ratio;
+      canvas.height = parent.clientHeight * ratio;
+      canvas.style.width = parent.clientWidth + 'px';
+      canvas.style.height = parent.clientHeight + 'px';
+      const ctx = canvas.getContext('2d');
+      ctx.scale(ratio, ratio);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, parent.clientWidth, parent.clientHeight);
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+    // eslint-disable-next-line
+  }, [open]);
+
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const point = e.touches ? e.touches[0] : e;
+    return {
+      x: (point.clientX - rect.left) * (rect.width ? 1 : 1),
+      y: (point.clientY - rect.top) * (rect.height ? 1 : 1),
+    };
+  };
+
+  const start = (e) => {
+    e.preventDefault();
+    drawing.current = true;
+    last.current = getPos(e);
+    setHasDrawn(true);
+  };
+  const move = (e) => {
+    if (!drawing.current) return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const pos = getPos(e);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = thickness;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(last.current.x, last.current.y);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    last.current = pos;
+  };
+  const end = () => { drawing.current = false; };
+
+  const clear = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const ratio = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+    setHasDrawn(false);
+  };
+
+  const save = () => {
+    if (!hasDrawn) { return; }
+    if (!name.trim()) { return; }
+    setSaving(true);
+    const dataUrl = canvasRef.current.toDataURL('image/png');
+    onSave({ image: dataUrl, name: name.trim(), title: title.trim(), signedAt: nowJalaliDateTime() });
+    setSaving(false);
+    onClose();
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[70] no-print bg-white flex flex-col" style={{ height: '100dvh' }}>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
+        <div>
+          <h3 className="font-bold text-slate-800">امضای دیجیتال — {roleLabel}</h3>
+          <p className="text-xs text-slate-400">با انگشت یا قلم روی صفحه امضا کنید</p>
+        </div>
+        <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-500">✕</button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 px-4 py-3 border-b border-slate-100 shrink-0">
+        <Field label="نام امضاکننده">
+          <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="نام و نام خانوادگی" />
+        </Field>
+        <Field label="سمت">
+          <input value={title} onChange={e => setTitle(e.target.value)} className={inputCls} placeholder="مثال: بازرس فنی" />
+        </Field>
+      </div>
+
+      <div className="flex-1 min-h-0 relative bg-slate-50">
+        <canvas
+          ref={canvasRef}
+          className="signature-canvas absolute inset-0 w-full h-full"
+          onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+          onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+        />
+        {!hasDrawn && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 text-sm">
+            محل امضا
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-t border-slate-100 shrink-0">
+        <div className="flex items-center gap-1.5">
+          {['#0f172a', '#1c5fe0', '#dc2626'].map(c => (
+            <button key={c} onClick={() => setColor(c)}
+              className={"w-7 h-7 rounded-full border-2 " + (color === c ? "border-slate-400" : "border-transparent")}
+              style={{ backgroundColor: c }} title={c === '#0f172a' ? 'مشکی رسمی' : c === '#1c5fe0' ? 'آبی اداری' : 'قرمز'} />
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5">
+          {[{ v: 2, l: 'نازک' }, { v: 3.5, l: 'متوسط' }, { v: 6, l: 'ضخیم' }].map(t => (
+            <button key={t.v} onClick={() => setThickness(t.v)}
+              className={"px-2.5 py-1.5 rounded-lg text-xs border " + (thickness === t.v ? "bg-brand-50 border-brand-300 text-brand-700" : "border-slate-200 text-slate-500")}>
+              {t.l}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1"></div>
+        <button onClick={clear} className="px-3.5 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">پاک کردن</button>
+        <button onClick={save} disabled={!hasDrawn || !name.trim() || saving}
+          className="px-5 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50">
+          ثبت امضا
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۹. اسکنر دوربین زنده (بدون ری‌استارت مکرر — رفع باگ نمونه قبلی)
+   ============================================================ */
+function CameraScanner({ open, onClose, onDetect }) {
+  const containerId = 'qr-camera-region';
+  const instanceRef = useRef(null);
+  const [error, setError] = useState('');
+  const [scanning, setScanning] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setError('');
+    const html5Qr = new Html5Qrcode(containerId);
+    instanceRef.current = html5Qr;
+
+    html5Qr.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 240, height: 240 } },
+      (decodedText) => {
+        if (cancelled) return;
+        // جلوگیری از فراخوانی مکرر/ری‌استارت دوربین با متوقف کردن قطعی پس از اولین تشخیص
+        cancelled = true;
+        html5Qr.stop().then(() => html5Qr.clear()).catch(() => {}).finally(() => {
+          onDetect(decodedText);
+        });
+      },
+      () => { /* خطاهای فریم‌به‌فریم عادی نادیده گرفته می‌شود */ }
+    ).then(() => { if (!cancelled) setScanning(true); })
+      .catch(err => setError('دسترسی به دوربین ممکن نشد: ' + (err && err.message ? err.message : String(err))));
+
+    return () => {
+      cancelled = true;
+      const inst = instanceRef.current;
+      if (inst) {
+        inst.stop().then(() => inst.clear()).catch(() => {});
+      }
+      instanceRef.current = null;
+      setScanning(false);
+    };
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[70] no-print bg-black flex flex-col" style={{ height: '100dvh' }}>
+      <div className="flex items-center justify-between px-4 py-3 text-white shrink-0">
+        <h3 className="font-bold">اسکن بارکد تجهیز</h3>
+        <button onClick={onClose} className="w-9 h-9 rounded-lg hover:bg-white/10">✕</button>
+      </div>
+      <div className="flex-1 relative flex items-center justify-center">
+        <div id={containerId} className="w-full max-w-md"></div>
+        {!scanning && !error && (
+          <div className="absolute inset-0 flex items-center justify-center text-white/70 text-sm">در حال راه‌اندازی دوربین…</div>
+        )}
+        {error && (
+          <div className="absolute inset-x-4 top-1/2 -translate-y-1/2 text-center text-danger-300 text-sm bg-black/60 rounded-xl p-4">{error}</div>
+        )}
+      </div>
+      <p className="text-white/50 text-xs text-center pb-6 shrink-0">بارکد روی برچسب تجهیز را داخل کادر قرار دهید</p>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۰. استودیوی تمام‌صفحه بارکد QR تجهیز
+   ============================================================ */
+function AssetQrStudio({ asset, org, onClose, onRun }) {
+  const svgRef = useRef(null);
+  const scanUrl = makeScanUrl(asset.id);
+  const svgMarkup = useMemo(() => buildQrSvgMarkup(scanUrl), [scanUrl]);
+  const { notify } = useAppData();
+
+  const printLabel = () => {
+    const w = window.open('', '_blank', 'width=480,height=640');
+    if (!w) return;
+    w.document.write(`
+      <!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
+      <title>برچسب ${asset.code}</title>
+      <style>
+        @page { size: 80mm 110mm; margin: 4mm; }
+        body { font-family: Tahoma, sans-serif; margin:0; display:flex; align-items:center; justify-content:center; }
+        .label { width:100%; border:2px solid #0f172a; border-radius:10px; padding:10px; text-align:center; }
+        .code { font-size:20px; font-weight:bold; letter-spacing:1px; }
+        .name { font-size:12px; color:#334155; margin:4px 0 8px; }
+        .qr { width:150px; height:150px; margin:0 auto; }
+        .org { font-size:10px; color:#64748b; margin-top:6px; }
+      </style></head><body>
+      <div class="label">
+        <div class="code">${asset.code}</div>
+        <div class="name">${asset.name || ''}</div>
+        <div class="qr">${svgMarkup}</div>
+        <div class="org">${org.orgName || ''} — اسکن برای ثبت بازرسی</div>
+      </div>
+      <script>window.onload=()=>{window.print();}<\/script>
+      </body></html>`);
+    w.document.close();
+  };
+
+  const downloadPng = async () => {
+    try {
+      const dataUrl = await svgMarkupToPngDataUrl(svgMarkup, 900);
+      downloadDataUrl(dataUrl, `${asset.code}-qr.png`);
+    } catch (e) { notify('خطا در تولید تصویر PNG', 'error'); }
+  };
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(scanUrl);
+      notify('لینک اسکن کپی شد.', 'success');
+    } catch (e) { notify('کپی خودکار پشتیبانی نمی‌شود؛ لینک: ' + scanUrl, 'info'); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] no-print bg-slate-950/95 flex items-center justify-center p-4" style={{ height: '100dvh' }}>
+      <button onClick={onClose} className="absolute top-4 left-4 text-white/70 hover:text-white w-10 h-10 rounded-xl hover:bg-white/10">✕</button>
+      <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center">
+        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-brand-50 text-brand-700 text-xs font-medium mb-3">کارت رسمی تجهیز</div>
+        <h2 className="text-2xl font-black text-slate-800 tracking-wide">{asset.code}</h2>
+        <p className="text-slate-500 text-sm mb-4">{asset.name}</p>
+        <div ref={svgRef} className="w-48 h-48 mx-auto p-3 border border-slate-200 rounded-2xl" dangerouslySetInnerHTML={{ __html: svgMarkup }} />
+        <div className="text-xs text-slate-400 mt-3 space-y-0.5">
+          <p>محل استقرار: {asset.location || '—'}</p>
+          <p>سریال: {asset.serial || '—'}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mt-5">
+          <button onClick={onRun} className="col-span-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl py-2.5 text-sm font-medium">اجرای فرم بازرسی این تجهیز</button>
+          <button onClick={printLabel} className="border border-slate-200 hover:bg-slate-50 rounded-xl py-2.5 text-sm text-slate-700">🖨️ چاپ برچسب</button>
+          <button onClick={downloadPng} className="border border-slate-200 hover:bg-slate-50 rounded-xl py-2.5 text-sm text-slate-700">⬇️ دانلود PNG</button>
+          <button onClick={copyLink} className="col-span-2 border border-slate-200 hover:bg-slate-50 rounded-xl py-2.5 text-sm text-slate-700">🔗 کپی لینک مستقیم اسکن</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۱. صفحه مدیریت تجهیزات
+   ============================================================ */
+function printAllLabelsSheet(assets, org) {
+  const w = window.open('', '_blank');
+  if (!w) return;
+  const cells = assets.map(a => {
+    const svg = buildQrSvgMarkup(makeScanUrl(a.id));
+    return `
+      <div class="cell">
+        <div class="code">${a.code}</div>
+        <div class="name">${a.name || ''}</div>
+        <div class="qr">${svg}</div>
+      </div>`;
+  }).join('');
+  w.document.write(`
+    <!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>شیت برچسب‌ها</title>
+    <style>
+      @page { size: A4; margin: 10mm; }
+      body { font-family: Tahoma, sans-serif; }
+      .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 8mm; }
+      .cell { border:1.5px dashed #94a3b8; border-radius:8px; padding:6mm; text-align:center; break-inside: avoid; }
+      .code { font-weight:bold; font-size:14px; }
+      .name { font-size:10px; color:#475569; margin:2px 0 4px; }
+      .qr { width:80px; height:80px; margin:0 auto; }
+      .hdr { text-align:center; font-size:11px; color:#64748b; margin-bottom:6mm; }
+    </style></head><body>
+    <div class="hdr">${org.orgName || ''} — شیت برچسب‌های تجهیزات — چاپ و برش برای نصب روی تابلوها</div>
+    <div class="grid">${cells}</div>
+    <script>window.onload=()=>{window.print();}<\/script>
+    </body></html>`);
+  w.document.close();
+}
+
+function AssetForm({ initial, templates, categories, onSave, onCancel }) {
+  const [f, setF] = useState(initial || { code: '', name: '', location: '', serial: '', templateId: templates[0] ? templates[0].id : '' });
+  return (
+    <div className="space-y-3">
+      <Field label="کد تجهیز"><input className={inputCls} value={f.code} onChange={e => setF({ ...f, code: e.target.value })} placeholder="DB-21" /></Field>
+      <Field label="نام تجهیز"><input className={inputCls} value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
+      <Field label="محل استقرار"><input className={inputCls} value={f.location} onChange={e => setF({ ...f, location: e.target.value })} /></Field>
+      <Field label="شماره سریال"><input className={inputCls} value={f.serial} onChange={e => setF({ ...f, serial: e.target.value })} /></Field>
+      <Field label="چک‌لیست مرتبط">
+        <select className={inputCls} value={f.templateId} onChange={e => setF({ ...f, templateId: e.target.value })}>
+          {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </Field>
+      <div className="flex gap-2 justify-end pt-2">
+        <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+        <button onClick={() => f.code && f.name && onSave(f)} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره</button>
+      </div>
+    </div>
+  );
+}
+
+function AssetsPage({ goRunner }) {
+  const { data, update, currentUser, notify } = useAppData();
+  const [studioAsset, setStudioAsset] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [query, setQuery] = useState('');
+  const canManage = currentUser.role === 'admin' || currentUser.role === 'manager';
+
+  const filtered = data.assets.filter(a =>
+    (a.code + a.name + a.location).toLowerCase().includes(query.toLowerCase())
+  );
+
+  const saveAsset = (f) => {
+    update(d => {
+      if (editing && editing.id) {
+        const idx = d.assets.findIndex(a => a.id === editing.id);
+        d.assets[idx] = { ...d.assets[idx], ...f };
+      } else {
+        d.assets.push({ id: 'asset-' + Date.now(), ...f });
+      }
+    });
+    setShowForm(false); setEditing(null);
+    notify('تجهیز ذخیره شد.', 'success');
+  };
+
+  const deleteAsset = (id) => {
+    update(d => { d.assets = d.assets.filter(a => a.id !== id); });
+    setConfirmDel(null);
+    notify('تجهیز حذف شد.', 'success');
+  };
+
+  const onScanDetected = (text) => {
+    setScannerOpen(false);
+    let assetId = text;
+    try {
+      const url = new URL(text);
+      const p = url.searchParams.get('scan');
+      if (p) assetId = p;
+    } catch (e) { /* متن ساده بود، همان مقدار استفاده می‌شود */ }
+    const asset = data.assets.find(a => a.id === assetId || a.code === assetId);
+    if (asset) goRunner(asset.id);
+    else notify('تجهیزی مطابق بارکد اسکن‌شده یافت نشد.', 'error');
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center gap-3 justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">مدیریت تجهیزات</h2>
+          <p className="text-sm text-slate-500">{toPersianDigits(data.assets.length)} تجهیز ثبت‌شده</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setScannerOpen(true)} className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium text-slate-700 flex items-center gap-1.5">
+            📷 اسکن با دوربین
+          </button>
+          {canManage && (
+            <button onClick={() => printAllLabelsSheet(data.assets, data.settings)} className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium text-slate-700">
+              🖨️ چاپ شیت کامل برچسب‌ها (A4)
+            </button>
+          )}
+          {canManage && (
+            <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">
+              + تجهیز جدید
+            </button>
+          )}
+        </div>
+      </div>
+
+      <input value={query} onChange={e => setQuery(e.target.value)} placeholder="جستجو بر اساس کد، نام یا محل…"
+        className={inputCls + " max-w-sm"} />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.map(a => (
+          <div key={a.id} className="bg-white rounded-2xl border border-slate-200 p-4 hover:shadow-md transition">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="font-bold text-slate-800">{a.code}</div>
+                <div className="text-sm text-slate-500">{a.name}</div>
+              </div>
+              <button onClick={() => setStudioAsset(a)}
+                className="w-16 h-16 border border-slate-200 rounded-xl p-1.5 hover:border-brand-400 transition"
+                dangerouslySetInnerHTML={{ __html: buildQrSvgMarkup(makeScanUrl(a.id)) }} title="نمایش استودیوی بارکد" />
+            </div>
+            <div className="text-xs text-slate-400 mt-2 space-y-0.5">
+              <p>📍 {a.location || 'محل نامشخص'}</p>
+              <p>🔧 سریال: {a.serial || '—'}</p>
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={() => goRunner(a.id)} className="flex-1 text-xs bg-brand-50 text-brand-700 rounded-lg py-2 hover:bg-brand-100">اجرای بازرسی</button>
+              {canManage && <button onClick={() => { setEditing(a); setShowForm(true); }} className="text-xs bg-slate-100 text-slate-600 rounded-lg py-2 px-3 hover:bg-slate-200">ویرایش</button>}
+              {canManage && <button onClick={() => setConfirmDel(a)} className="text-xs bg-danger-50 text-danger-700 rounded-lg py-2 px-3 hover:bg-danger-100">حذف</button>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? 'ویرایش تجهیز' : 'تجهیز جدید'}>
+        <AssetForm initial={editing} templates={data.templates.filter(t => !t.archived)} categories={data.categories}
+          onSave={saveAsset} onCancel={() => setShowForm(false)} />
+      </Modal>
+
+      <ConfirmDialog open={!!confirmDel} title="حذف تجهیز"
+        message={confirmDel ? `آیا از حذف «${confirmDel.code} - ${confirmDel.name}» مطمئن هستید؟ سوابق بازرسی مرتبط حذف نمی‌شوند اما به این تجهیز ارجاع خواهند داد.` : ''}
+        danger onConfirm={() => deleteAsset(confirmDel.id)} onCancel={() => setConfirmDel(null)} />
+
+      {studioAsset && <AssetQrStudio asset={studioAsset} org={data.settings} onClose={() => setStudioAsset(null)}
+        onRun={() => { setStudioAsset(null); goRunner(studioAsset.id); }} />}
+
+      <CameraScanner open={scannerOpen} onClose={() => setScannerOpen(false)} onDetect={onScanDetected} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۲. صفحه مدیریت قالب‌های چک‌لیست (Templates)
+   ============================================================ */
+const ITEM_TYPE_LABELS = {
+  checkbox: 'چک‌باکس (تأیید)',
+  yesno: 'بله / خیر',
+  rating: 'امتیازی',
+  numeric: 'عددی',
+  text: 'متنی',
+  select: 'انتخابی',
+};
+
+function TemplateEditor({ initial, categories, onSave, onCancel }) {
+  const [t, setT] = useState(initial || { name: '', category: categories[0] || '', passThreshold: 80, items: [] });
+
+  const addItem = () => {
+    setT({ ...t, items: [...t.items, { id: 'it-' + Date.now(), type: 'checkbox', label: '', weight: 10, critical: false }] });
+  };
+  const updateItem = (idx, patch) => {
+    const items = t.items.slice();
+    items[idx] = { ...items[idx], ...patch };
+    setT({ ...t, items });
+  };
+  const removeItem = (idx) => {
+    setT({ ...t, items: t.items.filter((_, i) => i !== idx) });
+  };
+  const move = (idx, dir) => {
+    const items = t.items.slice();
+    const j = idx + dir;
+    if (j < 0 || j >= items.length) return;
+    [items[idx], items[j]] = [items[j], items[idx]];
+    setT({ ...t, items });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="نام قالب"><input className={inputCls} value={t.name} onChange={e => setT({ ...t, name: e.target.value })} /></Field>
+        <Field label="دسته‌بندی">
+          <select className={inputCls} value={t.category} onChange={e => setT({ ...t, category: e.target.value })}>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="حد نصاب قبولی (%)">
+          <input type="number" className={inputCls} value={t.passThreshold}
+            onChange={e => setT({ ...t, passThreshold: Number(toEnglishDigits(e.target.value)) || 0 })} />
+        </Field>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <h4 className="font-medium text-sm text-slate-700">آیتم‌های بازرسی</h4>
+          <button onClick={addItem} className="text-xs bg-brand-50 text-brand-700 rounded-lg px-3 py-1.5 hover:bg-brand-100">+ افزودن آیتم</button>
+        </div>
+        {t.items.length === 0 && <p className="text-xs text-slate-400">هنوز آیتمی افزوده نشده است.</p>}
+        {t.items.map((it, idx) => (
+          <div key={it.id} className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
+            <div className="flex gap-2">
+              <input className={inputCls + " flex-1"} placeholder="عنوان آیتم" value={it.label} onChange={e => updateItem(idx, { label: e.target.value })} />
+              <select className={inputCls + " w-40"} value={it.type} onChange={e => updateItem(idx, { type: e.target.value })}>
+                {Object.entries(ITEM_TYPE_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-xs text-slate-500 flex items-center gap-1">وزن
+                <input type="number" className="w-16 border border-slate-300 rounded-lg px-2 py-1 text-xs" value={it.weight}
+                  onChange={e => updateItem(idx, { weight: Number(toEnglishDigits(e.target.value)) || 0 })} />
+              </label>
+              {(it.type === 'checkbox' || it.type === 'yesno') && (
+                <label className="text-xs text-slate-500 flex items-center gap-1.5">
+                  <input type="checkbox" checked={!!it.critical} onChange={e => updateItem(idx, { critical: e.target.checked })} />
+                  آیتم حیاتی (Critical)
+                </label>
+              )}
+              {it.type === 'rating' && (
+                <label className="text-xs text-slate-500 flex items-center gap-1">حداکثر امتیاز
+                  <input type="number" className="w-14 border border-slate-300 rounded-lg px-2 py-1 text-xs" value={it.scaleMax || 5}
+                    onChange={e => updateItem(idx, { scaleMax: Number(toEnglishDigits(e.target.value)) || 5 })} />
+                </label>
+              )}
+              {it.type === 'select' && (
+                <input className="flex-1 min-w-[10rem] border border-slate-300 rounded-lg px-2 py-1 text-xs" placeholder="گزینه‌ها با کاما جدا شوند"
+                  value={(it.options || []).join('،')} onChange={e => updateItem(idx, { options: e.target.value.split(/[،,]/).map(s => s.trim()).filter(Boolean) })} />
+              )}
+              <div className="flex-1"></div>
+              <button onClick={() => move(idx, -1)} className="w-7 h-7 rounded-lg hover:bg-slate-200 text-xs">▲</button>
+              <button onClick={() => move(idx, 1)} className="w-7 h-7 rounded-lg hover:bg-slate-200 text-xs">▼</button>
+              <button onClick={() => removeItem(idx)} className="w-7 h-7 rounded-lg hover:bg-danger-50 text-danger-600 text-xs">✕</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-2 justify-end pt-2">
+        <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+        <button onClick={() => t.name && onSave(t)} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره قالب</button>
+      </div>
+    </div>
+  );
+}
+
+function TemplatesPage() {
+  const { data, update, notify } = useAppData();
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(null);
+
+  const usageCount = (tplId) => data.assets.filter(a => a.templateId === tplId).length;
+
+  const saveTemplate = (t) => {
+    update(d => {
+      if (editing && editing.id) {
+        const idx = d.templates.findIndex(x => x.id === editing.id);
+        d.templates[idx] = { ...d.templates[idx], ...t };
+      } else {
+        d.templates.push({ id: 'tpl-' + Date.now(), archived: false, ...t });
+      }
+    });
+    setShowForm(false); setEditing(null);
+    notify('قالب چک‌لیست ذخیره شد.', 'success');
+  };
+
+  const toggleArchive = (tpl) => {
+    update(d => {
+      const idx = d.templates.findIndex(x => x.id === tpl.id);
+      d.templates[idx].archived = !d.templates[idx].archived;
+    });
+    setConfirmArchive(null);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">قالب‌های چک‌لیست</h2>
+          <p className="text-sm text-slate-500">تعریف آیتم‌های بازرسی، وزن‌دهی و موارد حیاتی</p>
+        </div>
+        <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ قالب جدید</button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {data.templates.map(t => (
+          <div key={t.id} className={"bg-white rounded-2xl border p-4 " + (t.archived ? "border-slate-200 opacity-60" : "border-slate-200")}>
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="font-bold text-slate-800">{t.name}</div>
+                <div className="text-xs text-slate-400 mt-0.5">{t.category} · {toPersianDigits(t.items.length)} آیتم · حد نصاب {toPersianDigits(t.passThreshold)}٪</div>
+              </div>
+              {t.archived && <Badge tone="slate">بایگانی‌شده</Badge>}
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={() => { setEditing(t); setShowForm(true); }} className="text-xs bg-slate-100 text-slate-600 rounded-lg py-2 px-3 hover:bg-slate-200">ویرایش</button>
+              <button onClick={() => setConfirmArchive(t)} className="text-xs bg-warn-50 text-warn-700 rounded-lg py-2 px-3 hover:bg-warn-500/20">
+                {t.archived ? 'بازگردانی' : 'بایگانی'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Modal open={showForm} onClose={() => setShowForm(false)} wide title={editing ? 'ویرایش قالب' : 'قالب جدید'}>
+        <TemplateEditor initial={editing} categories={data.categories} onSave={saveTemplate} onCancel={() => setShowForm(false)} />
+      </Modal>
+
+      <ConfirmDialog open={!!confirmArchive}
+        title={confirmArchive && confirmArchive.archived ? 'بازگردانی قالب' : 'بایگانی قالب'}
+        message={confirmArchive ? `این قالب توسط ${toPersianDigits(usageCount(confirmArchive.id))} تجهیز استفاده می‌شود. آیا ادامه می‌دهید؟` : ''}
+        onConfirm={() => toggleArchive(confirmArchive)} onCancel={() => setConfirmArchive(null)} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۳. موتور اجرای چک‌لیست (Runner)
+   ============================================================ */
+function ChecklistItemInput({ item, value, onChange }) {
+  if (item.type === 'checkbox') {
+    return (
+      <label className="flex items-center gap-2.5 cursor-pointer">
+        <input type="checkbox" className="w-5 h-5 accent-brand-600" checked={!!value} onChange={e => onChange(e.target.checked)} />
+        <span className="text-sm text-slate-700">تأیید می‌شود</span>
+      </label>
+    );
+  }
+  if (item.type === 'yesno') {
+    return (
+      <div className="flex gap-2">
+        {['بله', 'خیر'].map(v => (
+          <button key={v} type="button" onClick={() => onChange(v)}
+            className={"px-4 py-2 rounded-xl text-sm border " + (value === v ? (v === 'بله' ? "bg-ok-50 border-ok-500 text-ok-700" : "bg-danger-50 border-danger-500 text-danger-700") : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
+            {v}
+          </button>
+        ))}
+      </div>
+    );
+  }
+  if (item.type === 'rating') {
+    const max = item.scaleMax || 5;
+    return (
+      <div className="flex gap-1.5">
+        {Array.from({ length: max }, (_, i) => i + 1).map(n => (
+          <button key={n} type="button" onClick={() => onChange(n)}
+            className={"w-9 h-9 rounded-lg text-sm border " + (Number(value) >= n ? "bg-brand-600 border-brand-600 text-white" : "border-slate-200 text-slate-400 hover:bg-slate-50")}>
+            {toPersianDigits(n)}
+          </button>
+        ))}
+      </div>
+    );
+  }
+  if (item.type === 'numeric') {
+    return <input type="number" className={inputCls} value={value === undefined ? '' : value}
+      onChange={e => onChange(toEnglishDigits(e.target.value))} />;
+  }
+  if (item.type === 'select') {
+    return (
+      <select className={inputCls} value={value || ''} onChange={e => onChange(e.target.value)}>
+        <option value="">— انتخاب کنید —</option>
+        {(item.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+  return <textarea className={inputCls} rows={2} value={value || ''} onChange={e => onChange(e.target.value)} />;
+}
+
+function RunnerPage({ assetId, assignmentId, onFinish }) {
+  const { data, update, currentUser, notify } = useAppData();
+  const [selectedAssetId, setSelectedAssetId] = useState(assetId || (data.assets[0] && data.assets[0].id) || '');
+  const asset = data.assets.find(a => a.id === selectedAssetId);
+  const [templateId, setTemplateId] = useState(asset ? asset.templateId : '');
+  const template = data.templates.find(t => t.id === templateId) || data.templates.find(t => t.id === (asset && asset.templateId));
+
+  useEffect(() => {
+    if (assetId) setSelectedAssetId(assetId);
+  }, [assetId]);
+  useEffect(() => {
+    if (asset) setTemplateId(asset.templateId);
+  }, [asset && asset.id]);
+
+  const [answers, setAnswers] = useState({});
+  const [dueDate, setDueDate] = useState('');
+  const [notes, setNotes] = useState('');
+  const [inspectorName, setInspectorName] = useState(currentUser.name || '');
+  const [sigPad, setSigPad] = useState(null); // 'inspector' | 'approver' | null
+  const [signatures, setSignatures] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => { setAnswers({}); setSignatures({}); }, [templateId, selectedAssetId]);
+
+  if (!asset || !template) {
+    return <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400">
+      ابتدا یک تجهیز ثبت کنید تا بتوانید بازرسی را اجرا کنید.
+    </div>;
+  }
+
+  const preview = scoreRecord(template, answers);
+
+  const submit = () => {
+    if (!inspectorName.trim()) { notify('نام بازرس را وارد کنید.', 'error'); return; }
+    if (!signatures.inspector) { notify('امضای بازرس / اجراکننده الزامی است.', 'error'); return; }
+    setSubmitting(true);
+    const result = scoreRecord(template, answers);
+    const record = {
+      id: 'rec-' + Date.now(),
+      assetId: asset.id,
+      assetCode: asset.code,
+      assetTitle: asset.name || '',
+      location: asset.location || '',
+      templateId: template.id,
+      templateName: template.name,
+      category: template.category || '',
+      inspectorName: inspectorName.trim(),
+      date: nowJalaliDateTime(),
+      completedAt: new Date().toISOString(),
+      dueDate,
+      answers,
+      details: result.details,
+      percent: result.percent,
+      status: result.status,
+      criticalFail: !!result.criticalFail,
+      score: Math.round(result.earned || 0),
+      maxScore: result.totalWeight || 0,
+      notes,
+      signatures,
+    };
+    update(d => {
+      d.records.unshift(record);
+      if (assignmentId) {
+        const idx = d.assignments.findIndex(a => a.id === assignmentId);
+        if (idx > -1) { d.assignments[idx].status = 'done'; d.assignments[idx].recordId = record.id; d.assignments[idx].completedAt = new Date().toISOString(); }
+      }
+    });
+    notify('بازرسی با موفقیت ثبت شد.', 'success');
+    if (data.settings.googleAppsScriptUrl) {
+      sendRecordToAppsScript(data.settings.googleAppsScriptUrl, record, data.settings, notify);
+    }
+    setSubmitting(false);
+    if (onFinish) onFinish(record);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 p-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Field label="تجهیز">
+            <select className={inputCls} value={selectedAssetId} onChange={e => setSelectedAssetId(e.target.value)}>
+              {data.assets.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+            </select>
+          </Field>
+          <Field label="قالب چک‌لیست">
+            <select className={inputCls} value={templateId} onChange={e => setTemplateId(e.target.value)}>
+              {data.templates.filter(t => !t.archived).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          <Field label="مهلت انجام (تاریخ شمسی)">
+            <PersianDatePicker value={dueDate} onChange={setDueDate} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+          <Field label="نام بازرس / اجراکننده"><input className={inputCls} value={inspectorName} onChange={e => setInspectorName(e.target.value)} /></Field>
+          <Field label="کد و محل تجهیز"><input disabled className={inputCls + " bg-slate-50 text-slate-400"} value={`${asset.code} · ${asset.location || '—'}`} /></Field>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
+        <h3 className="font-bold text-slate-800">آیتم‌های بازرسی</h3>
+        {template.items.map(item => (
+          <div key={item.id} className="border-b border-slate-100 pb-4 last:border-0 last:pb-0">
+            <div className="flex items-start justify-between mb-2">
+              <p className="text-sm font-medium text-slate-700">{item.label}
+                {item.critical && <span className="text-danger-500 mr-1.5 text-xs">(حیاتی)</span>}
+              </p>
+              {item.weight > 0 && <span className="text-xs text-slate-400 shrink-0">وزن {toPersianDigits(item.weight)}</span>}
+            </div>
+            <ChecklistItemInput item={item} value={answers[item.id]} onChange={v => setAnswers(a => ({ ...a, [item.id]: v }))} />
+          </div>
+        ))}
+        <Field label="یادداشت‌های تکمیلی بازرسی"><textarea className={inputCls} rows={2} value={notes} onChange={e => setNotes(e.target.value)} /></Field>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-wrap items-center gap-4">
+        <div>
+          <span className="text-xs text-slate-400">امتیاز لحظه‌ای:</span>
+          <span className="text-lg font-bold text-slate-800 mx-1.5">{toPersianDigits(preview.percent)}٪</span>
+          <StatusBadge status={preview.status} />
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button onClick={() => setSigPad('inspector')}
+          className={"rounded-xl border-2 border-dashed p-4 text-sm text-center " + (signatures.inspector ? "border-ok-500 bg-ok-50" : "border-slate-300 hover:border-brand-400")}>
+          {signatures.inspector ? (
+            <div>
+              <img src={signatures.inspector.image} className="h-14 mx-auto object-contain" />
+              <p className="text-xs text-ok-700 mt-1">امضای بازرس ثبت شد — {signatures.inspector.name}</p>
+            </div>
+          ) : '✍️ ثبت امضای بازرس / اجراکننده'}
+        </button>
+        <button onClick={() => setSigPad('approver')}
+          className={"rounded-xl border-2 border-dashed p-4 text-sm text-center " + (signatures.approver ? "border-ok-500 bg-ok-50" : "border-slate-300 hover:border-brand-400")}>
+          {signatures.approver ? (
+            <div>
+              <img src={signatures.approver.image} className="h-14 mx-auto object-contain" />
+              <p className="text-xs text-ok-700 mt-1">امضای ناظر ثبت شد — {signatures.approver.name}</p>
+            </div>
+          ) : '✍️ ثبت امضای ناظر / تحویل‌گیرنده (اختیاری)'}
+        </button>
+      </div>
+
+      <div className="flex justify-end">
+        <button onClick={submit} disabled={submitting}
+          className="px-6 py-3 rounded-xl bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white font-medium">
+          ثبت نهایی بازرسی
+        </button>
+      </div>
+
+      <SignaturePad open={!!sigPad} onClose={() => setSigPad(null)}
+        roleLabel={sigPad === 'inspector' ? 'بازرس / اجراکننده' : 'ناظر / تحویل‌گیرنده در محل'}
+        initialName={sigPad === 'inspector' ? inspectorName : ''}
+        onSave={(sig) => setSignatures(s => ({ ...s, [sigPad]: sig }))} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۴. موتور خروجی‌ها (چاپ تکی/پشت‌سرهم/تجمیعی، اکسل، CSV)
+   ============================================================ */
+function recordReportHtml(rec, org) {
+  const rows = rec.details.map(d => `
+    <tr>
+      <td>${d.label}</td>
+      <td>${typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value === undefined || d.value === null || d.value === '' ? '—' : toPersianDigits(String(d.value)))}</td>
+      <td>${d.max > 0 ? toPersianDigits(Math.round(d.earned || 0)) + ' از ' + toPersianDigits(d.max) : 'اطلاعاتی'}</td>
+      <td>${d.critical ? 'بله' : 'خیر'}</td>
+    </tr>`).join('');
+  return `
+    <div class="report print-page">
+      <div class="hdr">
+        ${org.logoDataUrl ? `<img src="${org.logoDataUrl}" class="logo" />` : ''}
+        <div class="hdr-text">
+          <div class="org-name">${org.orgName || ''}</div>
+          <div class="sub">گزارش رسمی بازرسی چک‌لیست</div>
+        </div>
+      </div>
+      <table class="meta">
+        <tr><td>تجهیز</td><td>${rec.assetCode}</td><td>قالب چک‌لیست</td><td>${rec.templateName}</td></tr>
+        <tr><td>بازرس</td><td>${rec.inspectorName}</td><td>تاریخ ثبت</td><td>${toPersianDigits(rec.date)}</td></tr>
+        <tr><td>مهلت انجام</td><td>${toPersianDigits(rec.dueDate || '—')}</td><td>نتیجه</td><td><b>${rec.status}</b></td></tr>
+      </table>
+      <table class="results">
+        <thead><tr><th>عنوان آیتم</th><th>پاسخ</th><th>امتیاز</th><th>حیاتی</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="summary">
+        <div>درصد موفقیت: <b>${toPersianDigits(rec.percent)}٪</b></div>
+        <div>ارزیابی کیفی: <b>${qualityLabel(rec.percent)}</b></div>
+      </div>
+      ${rec.notes ? `<div class="notes"><b>یادداشت‌ها:</b> ${rec.notes}</div>` : ''}
+      <div class="sigs">
+        <div class="sig-box">
+          <div class="sig-title">امضای بازرس / اجراکننده</div>
+          ${rec.signatures && rec.signatures.inspector ? `<img src="${rec.signatures.inspector.image}" /><div class="sig-name">${rec.signatures.inspector.name} — ${rec.signatures.inspector.title || ''}</div>` : '<div class="sig-empty">ثبت نشده</div>'}
+        </div>
+        <div class="sig-box">
+          <div class="sig-title">امضای ناظر / تحویل‌گیرنده</div>
+          ${rec.signatures && rec.signatures.approver ? `<img src="${rec.signatures.approver.image}" /><div class="sig-name">${rec.signatures.approver.name} — ${rec.signatures.approver.title || ''}</div>` : '<div class="sig-empty">ثبت نشده</div>'}
+        </div>
+      </div>
+    </div>`;
+}
+
+const REPORT_STYLE = `
+  @page { size: A4; margin: 14mm; }
+  body { font-family: Tahoma, sans-serif; color:#0f172a; direction:rtl; }
+  .report { }
+  .hdr { display:flex; align-items:center; gap:12px; border-bottom:2px solid #0f172a; padding-bottom:10px; margin-bottom:12px; }
+  .logo { height:48px; }
+  .org-name { font-size:18px; font-weight:bold; }
+  .sub { font-size:12px; color:#475569; }
+  table.meta { width:100%; border-collapse:collapse; margin-bottom:14px; font-size:12px; }
+  table.meta td { border:1px solid #e2e8f0; padding:6px 8px; }
+  table.meta td:nth-child(odd) { background:#f8fafc; font-weight:bold; width:15%; }
+  table.results { width:100%; border-collapse:collapse; font-size:12px; margin-bottom:12px; }
+  table.results th, table.results td { border:1px solid #e2e8f0; padding:6px 8px; text-align:right; }
+  table.results th { background:#f1f5f9; }
+  .summary { display:flex; gap:24px; font-size:13px; margin-bottom:10px; }
+  .notes { font-size:12px; background:#f8fafc; padding:8px 10px; border-radius:6px; margin-bottom:14px; }
+  .sigs { display:flex; gap:16px; margin-top:20px; }
+  .sig-box { flex:1; border:1px solid #e2e8f0; border-radius:8px; padding:10px; text-align:center; }
+  .sig-title { font-size:11px; color:#64748b; margin-bottom:6px; }
+  .sig-box img { height:60px; object-fit:contain; }
+  .sig-name { font-size:11px; margin-top:4px; }
+  .sig-empty { font-size:11px; color:#cbd5e1; padding:20px 0; }
+`;
+
+function openReportWindow(bodyHtml, title) {
+  const w = window.open('', '_blank');
+  if (!w) return;
+  w.document.write(`<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><title>${title}</title><style>${REPORT_STYLE}</style></head><body>${bodyHtml}<script>window.onload=()=>{window.print();}<\/script></body></html>`);
+  w.document.close();
+}
+
+function printSingleRecord(rec, org) {
+  openReportWindow(recordReportHtml(rec, org), `گزارش ${rec.assetCode}`);
+}
+
+function printSequentialRecords(records, org) {
+  openReportWindow(records.map(r => recordReportHtml(r, org)).join(''), 'گزارش پشت‌سرهم بازرسی‌ها');
+}
+
+function printSummaryReport(records, org) {
+  const avg = records.length ? Math.round(records.reduce((s, r) => s + r.percent, 0) / records.length) : 0;
+  const rows = records.map(r => `
+    <tr>
+      <td>${r.assetCode}</td><td>${r.templateName}</td><td>${r.inspectorName}</td>
+      <td>${toPersianDigits(r.date)}</td><td>${toPersianDigits(r.percent)}٪</td><td>${r.status}</td>
+    </tr>`).join('');
+  const html = `
+    <div class="report">
+      <div class="hdr">
+        ${org.logoDataUrl ? `<img src="${org.logoDataUrl}" class="logo" />` : ''}
+        <div class="hdr-text"><div class="org-name">${org.orgName || ''}</div><div class="sub">گزارش تجمیعی سوابق بازرسی</div></div>
+      </div>
+      <table class="results">
+        <thead><tr><th>تجهیز</th><th>قالب</th><th>بازرس</th><th>تاریخ</th><th>درصد</th><th>وضعیت</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="summary"><div>تعداد سوابق: <b>${toPersianDigits(records.length)}</b></div><div>میانگین موفقیت: <b>${toPersianDigits(avg)}٪</b></div></div>
+    </div>`;
+  openReportWindow(html, 'گزارش تجمیعی');
+}
+
+function exportRecordsXlsx(records, org) {
+  const summarySheet = records.map(r => ({
+    'کد تجهیز': r.assetCode, 'قالب چک‌لیست': r.templateName, 'بازرس': r.inspectorName,
+    'تاریخ ثبت': r.date, 'مهلت انجام': r.dueDate || '', 'درصد موفقیت': r.percent, 'وضعیت': r.status,
+  }));
+  const detailRows = [];
+  records.forEach(r => {
+    (r.details || []).forEach(d => {
+      detailRows.push({
+        'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': d.label,
+        'پاسخ': typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value ?? ''),
+        'امتیاز کسب‌شده': d.earned ?? '', 'حداکثر امتیاز': d.max, 'حیاتی': d.critical ? 'بله' : 'خیر',
+      });
+    });
+    if (r.notes) detailRows.push({ 'کد تجهیز': r.assetCode, 'تاریخ ثبت': r.date, 'عنوان آیتم': 'یادداشت', 'پاسخ': r.notes, 'امتیاز کسب‌شده': '', 'حداکثر امتیاز': '', 'حیاتی': '' });
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), 'خلاصه سوابق');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), 'ریز پاسخها و یادداشتها');
+  XLSX.writeFile(wb, `سوابق-بازرسی-${Date.now()}.xlsx`);
+}
+
+function exportRecordsCsv(records) {
+  const header = ['کد تجهیز', 'قالب چک‌لیست', 'بازرس', 'تاریخ ثبت', 'مهلت انجام', 'درصد موفقیت', 'وضعیت'];
+  const lines = [header.join(',')];
+  records.forEach(r => {
+    lines.push([r.assetCode, r.templateName, r.inspectorName, r.date, r.dueDate || '', r.percent, r.status]
+      .map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  });
+  const csv = '\uFEFF' + lines.join('\r\n'); // BOM برای نمایش صحیح فارسی
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  downloadDataUrl(URL.createObjectURL(blob), `سوابق-بازرسی-${Date.now()}.csv`);
+}
+
+/* ============================================================
+   ۱۵. صفحه سوابق بازرسی و پنل خروجی‌ها
+   ============================================================ */
+function RecordsPage() {
+  const { data, notify, currentUser } = useAppData();
+  const [selected, setSelected] = useState([]);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('همه');
+  const [detailRec, setDetailRec] = useState(null);
+  const canManage = currentUser.role !== 'viewer';
+
+  const filtered = data.records.filter(r => {
+    const matchQ = (r.assetCode + r.inspectorName + r.templateName).toLowerCase().includes(query.toLowerCase());
+    const matchS = statusFilter === 'همه' || r.status === statusFilter;
+    return matchQ && matchS;
+  });
+
+  const toggle = (id) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+  const selectedRecords = data.records.filter(r => selected.includes(r.id));
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-lg font-bold text-slate-800">سوابق بازرسی</h2>
+        <p className="text-sm text-slate-500">{toPersianDigits(data.records.length)} سابقه ثبت‌شده</p>
+      </div>
+
+      <div className="flex flex-wrap gap-3 items-center">
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="جستجو بر اساس تجهیز، بازرس یا قالب…" className={inputCls + " max-w-xs"} />
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className={inputCls + " max-w-[10rem]"}>
+          {['همه', 'موفق', 'ناموفق', 'ناموفق (حیاتی)'].map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <div className="flex-1"></div>
+        {canManage && (
+          <div className="flex flex-wrap gap-2">
+            <button disabled={selected.length === 0} onClick={() => printSequentialRecords(selectedRecords, data.settings)}
+              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">چاپ پشت‌سرهم</button>
+            <button disabled={selected.length === 0} onClick={() => printSummaryReport(selectedRecords, data.settings)}
+              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">گزارش تجمیعی</button>
+            <button disabled={selected.length === 0} onClick={() => exportRecordsXlsx(selectedRecords, data.settings)}
+              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">خروجی اکسل</button>
+            <button disabled={selected.length === 0} onClick={() => exportRecordsCsv(selectedRecords)}
+              className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-sm hover:bg-slate-50 disabled:opacity-40">خروجی CSV</button>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-slate-500 text-xs">
+            <tr>
+              <th className="p-3 text-right"><input type="checkbox"
+                checked={filtered.length > 0 && filtered.every(r => selected.includes(r.id))}
+                onChange={e => setSelected(e.target.checked ? filtered.map(r => r.id) : [])} /></th>
+              <th className="p-3 text-right">تجهیز</th>
+              <th className="p-3 text-right">قالب</th>
+              <th className="p-3 text-right">بازرس</th>
+              <th className="p-3 text-right">تاریخ</th>
+              <th className="p-3 text-right">درصد</th>
+              <th className="p-3 text-right">وضعیت</th>
+              <th className="p-3 text-right">عملیات</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(r => (
+              <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50">
+                <td className="p-3"><input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} /></td>
+                <td className="p-3 font-medium">{r.assetCode}</td>
+                <td className="p-3 text-slate-500">{r.templateName}</td>
+                <td className="p-3 text-slate-500">{r.inspectorName}</td>
+                <td className="p-3 text-slate-500" dir="ltr">{toPersianDigits(r.date)}</td>
+                <td className="p-3 font-medium">{toPersianDigits(r.percent)}٪</td>
+                <td className="p-3"><StatusBadge status={r.status} /></td>
+                <td className="p-3 flex gap-1.5">
+                  <button onClick={() => setDetailRec(r)} className="text-xs bg-slate-100 hover:bg-slate-200 rounded-lg px-2.5 py-1.5">مشاهده</button>
+                  {canManage && <button onClick={() => printSingleRecord(r, data.settings)} className="text-xs bg-brand-50 text-brand-700 hover:bg-brand-100 rounded-lg px-2.5 py-1.5">چاپ</button>}
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr><td colSpan={8} className="p-8 text-center text-slate-400">سابقه‌ای یافت نشد.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <Modal open={!!detailRec} onClose={() => setDetailRec(null)} wide title={detailRec ? `جزئیات بازرسی ${detailRec.assetCode}` : ''}>
+        {detailRec && (
+          <div className="space-y-3 text-sm">
+            <div className="grid grid-cols-2 gap-2 text-slate-600">
+              <p>بازرس: {detailRec.inspectorName}</p>
+              <p dir="ltr">تاریخ: {toPersianDigits(detailRec.date)}</p>
+              <p>درصد موفقیت: {toPersianDigits(detailRec.percent)}٪</p>
+              <p>وضعیت: <StatusBadge status={detailRec.status} /></p>
+            </div>
+            <div className="divide-y divide-slate-100 border border-slate-100 rounded-xl overflow-hidden">
+              {detailRec.details.map(d => (
+                <div key={d.itemId} className="flex justify-between p-2.5 text-xs">
+                  <span className="text-slate-600">{d.label}</span>
+                  <span className="font-medium text-slate-800">{typeof d.value === 'boolean' ? (d.value ? 'تأیید شد' : 'تأیید نشد') : (d.value ?? '—')}</span>
+                </div>
+              ))}
+            </div>
+            {detailRec.notes && <p className="text-xs bg-slate-50 rounded-lg p-2.5">یادداشت: {detailRec.notes}</p>}
+            <button onClick={() => printSingleRecord(detailRec, data.settings)} className="w-full bg-brand-600 hover:bg-brand-700 text-white rounded-xl py-2.5">چاپ خروجی رسمی این بازرسی</button>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۶. صفحه مدیریت کاربران
+   ============================================================ */
+function UserForm({ initial, onSave, onCancel }) {
+  const [username, setUsername] = useState(initial ? initial.username : '');
+  const [name, setName] = useState(initial ? initial.name : '');
+  const [role, setRole] = useState(initial ? initial.role : 'inspector');
+  const [pages, setPages] = useState(initial && initial.pages ? initial.pages : (DEFAULT_PAGES_BY_ROLE[initial ? initial.role : 'inspector'] || []).filter(p => p !== 'users' && p !== 'settings'));
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  const togglePage = (key) => {
+    setPages(p => p.includes(key) ? p.filter(x => x !== key) : [...p, key]);
+  };
+
+  const submit = async () => {
+    if (!username.trim() || !name.trim()) { setError('نام کاربری و نام را کامل کنید.'); return; }
+    let passwordHash = initial ? initial.passwordHash : null;
+    if (password || !initial) {
+      const errMsg = validatePasswordStrength(password);
+      if (errMsg) { setError(errMsg); return; }
+      passwordHash = await sha256Hex(password);
+    }
+    onSave({ username: username.trim(), name: name.trim(), role, pages, passwordHash, active: true });
+  };
+
+  return (
+    <div className="space-y-3">
+      <Field label="نام کاربری"><input className={inputCls} value={username} onChange={e => setUsername(e.target.value)} /></Field>
+      <Field label="نام کامل"><input className={inputCls} value={name} onChange={e => setName(e.target.value)} /></Field>
+      <Field label="نقش" hint={role === 'admin' ? 'کاربر ادمین همیشه به همه‌ی صفحات از جمله «کاربران» و «تنظیمات» دسترسی کامل دارد.' : 'می‌توانید در پایین دسترسی این کاربر را به‌صورت دقیق تنظیم کنید.'}>
+        <select className={inputCls} value={role} onChange={e => setRole(e.target.value)}>
+          <option value="admin">ادمین (دسترسی کامل)</option>
+          <option value="manager">مدیر</option>
+          <option value="inspector">بازرس</option>
+          <option value="approver">تأییدکننده</option>
+          <option value="viewer">مشاهده‌گر</option>
+        </select>
+      </Field>
+      {role !== 'admin' && (
+        <Field label="دسترسی به صفحات (اختصاصی برای این کاربر)" hint="صفحات «کاربران» و «تنظیمات» فقط مخصوص ادمین است و از این طریق قابل واگذاری نیست.">
+          <div className="flex flex-wrap gap-2">
+            {ASSIGNABLE_PAGES.map(p => (
+              <label key={p.key} className={"flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border cursor-pointer " + (pages.includes(p.key) ? "bg-brand-50 border-brand-300 text-brand-700" : "border-slate-200 text-slate-500")}>
+                <input type="checkbox" className="hidden" checked={pages.includes(p.key)} onChange={() => togglePage(p.key)} />
+                {p.label}
+              </label>
+            ))}
+          </div>
+        </Field>
+      )}
+      <Field label={initial ? 'رمز عبور جدید (اختیاری)' : 'رمز عبور'} hint="حداقل ۶ کاراکتر و شامل حداقل یک رقم">
+        <input type="password" className={inputCls} value={password} onChange={e => setPassword(e.target.value)} />
+      </Field>
+      {error && <div className="text-danger-700 bg-danger-50 rounded-lg px-3 py-2 text-sm">{error}</div>}
+      <div className="flex gap-2 justify-end pt-2">
+        <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+        <button onClick={submit} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره</button>
+      </div>
+    </div>
+  );
+}
+
+function UsersPage() {
+  const { data, update, notify, session } = useAppData();
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const dependents = (userId) => data.records.filter(r => r.inspectorName === (data.users.find(u => u.id === userId) || {}).name).length;
+
+  const isSoleAdmin = (u) => u.role === 'admin' && data.users.filter(x => x.role === 'admin').length <= 1;
+
+  const saveUser = async (u) => {
+    if (editing) {
+      const dup = data.users.some(x => x.username === u.username && x.id !== editing.id);
+      if (dup) { notify('این نام کاربری قبلاً ثبت شده است.', 'error'); return; }
+      if (isSoleAdmin(editing) && u.role !== 'admin') { notify('امکان تغییر نقش تنها ادمین سیستم وجود ندارد؛ ابتدا کاربر ادمین دیگری تعریف کنید.', 'error'); return; }
+      update(d => { const idx = d.users.findIndex(x => x.id === editing.id); d.users[idx] = { ...d.users[idx], ...u }; });
+    } else {
+      const dup = data.users.some(x => x.username === u.username);
+      if (dup) { notify('این نام کاربری قبلاً ثبت شده است.', 'error'); return; }
+      update(d => { d.users.push({ id: 'u-' + Date.now(), ...u }); });
+    }
+    setShowForm(false); setEditing(null);
+    notify('کاربر ذخیره شد.', 'success');
+  };
+
+  const toggleActive = (u) => {
+    if (isSoleAdmin(u) && u.active !== false) { notify('امکان غیرفعال‌سازی تنها ادمین سیستم وجود ندارد.', 'error'); return; }
+    update(d => { const idx = d.users.findIndex(x => x.id === u.id); d.users[idx].active = !d.users[idx].active; });
+  };
+
+  const deleteUser = (u) => {
+    if (u.id === session.userId) { notify('امکان حذف حساب کاربری فعلی وجود ندارد.', 'error'); setConfirmDel(null); return; }
+    if (isSoleAdmin(u)) { notify('امکان حذف تنها ادمین سیستم وجود ندارد.', 'error'); setConfirmDel(null); return; }
+    update(d => { d.users = d.users.filter(x => x.id !== u.id); });
+    setConfirmDel(null);
+    notify('کاربر حذف شد.', 'success');
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">مدیریت کاربران</h2>
+          <p className="text-sm text-slate-500">تعریف نقش‌ها و دسترسی‌ها</p>
+        </div>
+        <button onClick={() => { setEditing(null); setShowForm(true); }} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ کاربر جدید</button>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-slate-500 text-xs">
+            <tr><th className="p-3 text-right">نام کاربری</th><th className="p-3 text-right">نام</th><th className="p-3 text-right">نقش</th><th className="p-3 text-right">وضعیت</th><th className="p-3 text-right">عملیات</th></tr>
+          </thead>
+          <tbody>
+            {data.users.map(u => (
+              <tr key={u.id} className="border-t border-slate-100">
+                <td className="p-3" dir="ltr">{u.username}</td>
+                <td className="p-3">{u.name}</td>
+                <td className="p-3"><Badge tone="brand">{ROLE_LABELS[u.role]}</Badge></td>
+                <td className="p-3">{u.active === false ? <Badge tone="slate">غیرفعال</Badge> : <Badge tone="ok">فعال</Badge>}</td>
+                <td className="p-3 flex gap-1.5">
+                  <button onClick={() => { setEditing(u); setShowForm(true); }} className="text-xs bg-slate-100 hover:bg-slate-200 rounded-lg px-2.5 py-1.5">ویرایش</button>
+                  <button onClick={() => toggleActive(u)} className="text-xs bg-warn-50 text-warn-700 hover:bg-warn-500/20 rounded-lg px-2.5 py-1.5">{u.active === false ? 'فعال‌سازی' : 'غیرفعال‌سازی'}</button>
+                  <button onClick={() => setConfirmDel(u)} className="text-xs bg-danger-50 text-danger-700 hover:bg-danger-100 rounded-lg px-2.5 py-1.5">حذف</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? 'ویرایش کاربر' : 'کاربر جدید'}>
+        <UserForm initial={editing} onSave={saveUser} onCancel={() => setShowForm(false)} />
+      </Modal>
+
+      <ConfirmDialog open={!!confirmDel} title="حذف کاربر" danger
+        message={confirmDel ? `«${confirmDel.name}» دارای ${toPersianDigits(dependents(confirmDel.id))} سابقه بازرسی ثبت‌شده است. حذف کاربر، سوابق را حذف نمی‌کند اما امکان ورود او را از بین می‌برد. ادامه می‌دهید؟` : ''}
+        onConfirm={() => deleteUser(confirmDel)} onCancel={() => setConfirmDel(null)} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۷. کد کامل Google Apps Script (پل ارتباطی بدون نیاز به کلود)
+   ============================================================ */
+const APPS_SCRIPT_CODE = `/**
+ * =====================================================================
+ *  سامانه چک‌لیست درکاو - اسکریپت سرور Google Drive
+ *  نسخه: 7.0 (چندکاربره، امن، با کلید API، قفل هم‌زمانی، لاگ، تاییدیه،
+ *            اعلان ایمیلی، فهرست/حذف سوابق، خروجی ZIP، محدودسازی نرخ)
+ * =====================================================================
+ *
+ *  این نسخه نسبت به نسخه‌های قبلی این تغییرات را دارد:
+ *   • همه‌ی عملیات (نه فقط پایگاه ابری) با یک «کلید API» محافظت می‌شوند.
+ *   • از LockService برای جلوگیری از تداخل نوشتن هم‌زمان چند کاربر استفاده می‌شود.
+ *   • محدودسازی نرخ درخواست (Rate limit) برای جلوگیری از سوءاستفاده.
+ *   • ثبت لاگ همه‌ی عملیات در یک شیت مخفی برای پیگیری و حسابرسی.
+ *   • عملیات جدید: فهرست سوابق، حذف سابقه، تاییدیه/رد سابقه توسط ناظر،
+ *     خروجی فشرده (ZIP) از PDFهای یک ماه، اعلان ایمیلی خودکار در بازرسی‌های
+ *     ناموفقِ حیاتی، و بررسی نسخه/سلامت سرویس.
+ *
+ *  =====================================================================
+ *  راهنمای نصب (۵ دقیقه):
+ *  ۱. در drive.google.com روی New > More > Google Apps Script بزنید
+ *     (یا مستقیم به script.google.com بروید و New project را بزنید).
+ *  ۲. کد پیش‌فرض را پاک کرده و این فایل را جایگزین کنید. نام فایل را
+ *     Code.gs بگذارید.
+ *  ۳. یک فایل جدید به نام appsscript.json اضافه و محتوای فایل appsscript.json
+ *     همراه این پروژه را در آن قرار دهید (از منوی Project Settings گزینه
+ *     «Show appsscript.json manifest file in editor» را فعال کنید).
+ *  ۴. برای تعیین کلید API: از منوی Project Settings > Script Properties،
+ *     یک ویژگی به نام API_KEY با مقداری دلخواه (مثلاً یک رشته تصادفی طولانی)
+ *     اضافه کنید. همین مقدار را در تنظیمات برنامه (فرانت‌اند) وارد کنید.
+ *     اگر این کار را نکنید، اولین کلیدی که از سمت برنامه ارسال شود به‌طور
+ *     خودکار ثبت می‌شود (مناسب تست سریع، اما برای استفاده‌ی واقعی توصیه
+ *     می‌شود کلید را از قبل در Script Properties ثبت کنید).
+ *  ۵. (اختیاری) برای اعلان ایمیلی بازرسی‌های ناموفق حیاتی، ویژگی
+ *     ADMIN_EMAIL را با آدرس ایمیل مدیر در Script Properties اضافه کنید.
+ *  ۶. دکمه Deploy > New deployment را بزنید:
+ *     - Select type: Web app
+ *     - Execute as: Me
+ *     - Who has access: Anyone
+ *  ۷. آدرس Web app URL را کپی و در تنظیمات برنامه وارد کنید، همراه با
+ *     همان کلید API که در مرحله ۴ ساختید.
+ *  ۸. برای هر کاربر/سازمان تازه، کافی است یک نمونه جدید از همین اسکریپت را
+ *     با کلید API مخصوص خودشان دیپلوی کنند؛ داده‌های هرکس در Google Drive
+ *     خودش و کاملاً جدا از دیگران ذخیره می‌شود.
+ * =====================================================================
+ */
+
+// ============ تنظیمات قابل تغییر ============
+var RATE_LIMIT_PER_MINUTE = 60;     // حداکثر تعداد درخواست مجاز در هر دقیقه برای هر کلید
+var LOCK_WAIT_MS = 30000;           // حداکثر زمان انتظار برای قفل هم‌زمانی
+
+// ============ توابع تبدیل تاریخ میلادی به شمسی (جلالی) ============
+function gregorianToJalali(gy, gm, gd) {
+  var g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+  var jy = (gy <= 1600) ? 0 : 979;
+  gy -= (gy <= 1600) ? 621 : 1600;
+  var gy2 = (gm > 2) ? (gy + 1) : gy;
+  var days = (365 * gy) + (Math.floor((gy2 + 3) / 4)) - (Math.floor((gy2 + 99) / 100)) +
+    (Math.floor((gy2 + 399) / 400)) - 80 + gd + g_d_m[gm - 1];
+  jy += 33 * (Math.floor(days / 12053));
+  days %= 12053;
+  jy += 4 * (Math.floor(days / 1461));
+  days %= 1461;
+  jy += Math.floor((days - 1) / 365);
+  if (days > 365) days = (days - 1) % 365;
+  var jm = (days < 186) ? 1 + Math.floor(days / 31) : 7 + Math.floor((days - 186) / 30);
+  var jd = 1 + ((days < 186) ? (days % 31) : ((days - 186) % 30));
+  return { jy: jy, jm: jm, jd: jd };
+}
+
+function pad2(n) {
+  n = String(n);
+  return n.length === 1 ? "0" + n : n;
+}
+
+function toJalaliDate(dateObj) {
+  var j = gregorianToJalali(dateObj.getFullYear(), dateObj.getMonth() + 1, dateObj.getDate());
+  return j.jy + "/" + pad2(j.jm) + "/" + pad2(j.jd);
+}
+
+function toJalaliDateTime(dateObj) {
+  return toJalaliDate(dateObj) + " - " + pad2(dateObj.getHours()) + ":" + pad2(dateObj.getMinutes());
+}
+
+function jalaliYear(dateObj) {
+  return String(gregorianToJalali(dateObj.getFullYear(), dateObj.getMonth() + 1, dateObj.getDate()).jy);
+}
+
+function jalaliMonthFolder(dateObj) {
+  var names = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+  var jm = gregorianToJalali(dateObj.getFullYear(), dateObj.getMonth() + 1, dateObj.getDate()).jm;
+  return pad2(jm) + "-" + names[jm - 1];
+}
+
+// =====================================================================
+// ورودی اصلی: doPost / doGet
+// =====================================================================
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    if (!e || !e.postData) return responseJson({ ok: false, error: "بدنه درخواست خالی است." });
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action || "save_record";
+    var rootFolderName = data.folderName || "سامانه چک‌لیست درکاو";
+
+    // ۱. عملیات بدون نیاز به کلید (فقط تست ساده اتصال)
+    if (action === "test" || action === "ping") {
+      var rootFolderPing = getOrCreateFolder(DriveApp.getRootFolder(), rootFolderName);
+      return responseJson({
+        ok: true, status: "success",
+        message: "اتصال به Google Drive با موفقیت برقرار شد!",
+        version: "7.0", folderName: rootFolderName, folderUrl: rootFolderPing.getUrl()
+      });
+    }
+    if (action === "version" || action === "health") {
+      return responseJson({ ok: true, status: "success", version: "7.0", time: new Date().toISOString() });
+    }
+
+    // ۲. از این‌جا به بعد همه‌ی عملیات نیاز به کلید API معتبر دارند
+    var auth = checkApiKey(data.apiKey);
+    if (!auth.ok) return responseJson({ ok: false, status: "error", error: auth.error });
+
+    // ۳. محدودسازی نرخ درخواست برای جلوگیری از سوءاستفاده
+    var rl = checkRateLimit(data.apiKey || "shared");
+    if (!rl.ok) return responseJson({ ok: false, status: "error", error: rl.error });
+
+    // قفل هم‌زمانی: از تداخل چند کاربر هنگام نوشتن هم‌زمان روی شیت/پوشه جلوگیری می‌کند
+    lock.tryLock(LOCK_WAIT_MS);
+
+    var rootFolder = getOrCreateFolder(DriveApp.getRootFolder(), rootFolderName);
+    var result = routeAction(action, data, rootFolder);
+    logAction(rootFolder, action, data, result);
+    return responseJson(result);
+
+  } catch (err) {
+    return responseJson({
+      ok: false, status: "error",
+      error: "خطا در سرور اسکریپت: " + err.toString(),
+      message: "خطا در سرور اسکریپت: " + err.toString()
+    });
+  } finally {
+    try { lock.releaseLock(); } catch (e2) {}
+  }
+}
+
+function routeAction(action, data, rootFolder) {
+  // ذخیره یک چک‌لیست کامل (PDF + ثبت در شیت تجمیعی)
+  if (action === "save_record" || action === "record" || action === "save_pdf" || action === "save_html_pdf") {
+    return handleSaveRecord(data, rootFolder);
+  }
+  // نسخه پشتیبان کامل سیستم (یک کاربر)
+  if (action === "backup") {
+    return handleBackup(data, rootFolder);
+  }
+  // پایگاه داده ابری چندکاربره
+  if (action === "cloud_push") return handleCloudPush(data, rootFolder);
+  if (action === "cloud_pull") return handleCloudPull(rootFolder);
+  if (action === "cloud_meta") return handleCloudMeta(rootFolder);
+
+  // فهرست سوابق ثبت‌شده (برای مرور/جست‌وجو از سمت برنامه)
+  if (action === "list_records") return handleListRecords(rootFolder, data);
+  // حذف یک سابقه (فایل به سطل زباله درایو منتقل می‌شود)
+  if (action === "delete_record") return handleDeleteRecord(rootFolder, data);
+  // تاییدیه یا رد یک سابقه توسط ناظر/تحویل‌گیرنده
+  if (action === "approve_record") return handleApproveRecord(rootFolder, data);
+  // خروجی فشرده (ZIP) از تمام PDFهای یک ماه/دسته مشخص
+  if (action === "export_zip") return handleExportZip(rootFolder, data);
+
+  return { ok: false, status: "error", error: "action نامعتبر است", message: "عملیات ناشناخته: " + action };
+}
+
+// =====================================================================
+// امنیت: کلید API و محدودسازی نرخ
+// =====================================================================
+function checkApiKey(provided) {
+  var props = PropertiesService.getScriptProperties();
+  var saved = props.getProperty("API_KEY") || "";
+  var given = String(provided || "").trim();
+  if (!saved) {
+    // هیچ کلیدی از قبل ثبت نشده: اولین کلید ارسالی به‌طور خودکار ثبت می‌شود.
+    // برای امنیت بیشتر در استفاده‌ی واقعی، پیشنهاد می‌شود کلید را از قبل در
+    // Script Properties با نام API_KEY تنظیم کنید تا این حالت رخ ندهد.
+    if (given) { props.setProperty("API_KEY", given); return { ok: true }; }
+    return { ok: false, error: "کلید API ارسال نشده و هیچ کلیدی از قبل ثبت نشده است." };
+  }
+  if (given === saved) return { ok: true };
+  return { ok: false, error: "کلید API نامعتبر است." };
+}
+
+function checkRateLimit(key) {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "rl_" + key;
+  var count = Number(cache.get(cacheKey) || "0");
+  if (count >= RATE_LIMIT_PER_MINUTE) {
+    return { ok: false, error: "تعداد درخواست‌ها بیش از حد مجاز است؛ کمی صبر کنید و دوباره تلاش کنید." };
+  }
+  cache.put(cacheKey, String(count + 1), 60); // شمارنده هر ۶۰ ثانیه ریست می‌شود
+  return { ok: true };
+}
+
+// =====================================================================
+// ذخیره‌سازی چک‌لیست (PDF + شیت تجمیعی)
+// =====================================================================
+function handleSaveRecord(data, rootFolder) {
+  var rec = data.record;
+  if (!rec) return { ok: false, status: "error", error: "فیلد record ارسال نشده است." };
+  var d = new Date(rec.completedAt || rec.startedAt || new Date());
+  var cat = rec.category || "عمومی";
+
+  var yearFolder = getOrCreateFolder(rootFolder, jalaliYear(d));
+  var monthFolder = getOrCreateFolder(yearFolder, jalaliMonthFolder(d));
+  var catFolder = getOrCreateFolder(monthFolder, cat);
+
+  var jDateStr = toJalaliDate(d).replace(/\//g, "-");
+  var assetPart = rec.assetCode ? cleanName(rec.assetCode) + "_" : "";
+  var titlePart = cleanName(rec.templateTitle || rec.templateName || "checklist");
+  var idPart = (rec.id || "").slice(-6);
+  var baseName = jDateStr + "_" + assetPart + titlePart + "_" + idPart;
+
+  var mainFile;
+  if (data.pdfBase64 && data.pdfBase64.length > 200) {
+    // دقیق‌ترین حالت: فایل PDF از قبل در مرورگر کاربر ساخته و ارسال شده است
+    mainFile = saveBase64Pdf(catFolder, baseName, data.pdfBase64);
+  } else if (data.html && data.html.length > 0) {
+    // حالت دوم: HTML کامل گزارش ارسال شده و در سرور به PDF تبدیل می‌شود
+    mainFile = createPdfFromHtml(catFolder, baseName, data.html, rec);
+  } else {
+    // اگر هیچ‌کدام نبود، حداقل خود داده به‌صورت JSON ذخیره می‌شود تا چیزی از دست نرود
+    mainFile = catFolder.createFile(baseName + ".json", JSON.stringify(rec, null, 2), MimeType.PLAIN_TEXT);
+  }
+
+  var sheetUrl = "";
+  try { sheetUrl = recordToSpreadsheet(rootFolder, rec, mainFile.getUrl()); } catch (errSheet) {}
+
+  // اعلان ایمیلی خودکار برای بازرسی‌های ناموفقِ حیاتی
+  try {
+    if (rec.criticalFail || rec.status === "ناموفق (حیاتی)") notifyCriticalFailure(rec, mainFile.getUrl());
+  } catch (errMail) {}
+
+  return {
+    ok: true, status: "success", message: "چک‌لیست در Google Drive ذخیره شد", saved: 1,
+    fileName: mainFile.getName(), fileUrl: mainFile.getUrl(), pdfUrl: mainFile.getUrl(),
+    url: mainFile.getUrl(), sheetUrl: sheetUrl
+  };
+}
+
+function notifyCriticalFailure(rec, fileUrl) {
+  var adminEmail = PropertiesService.getScriptProperties().getProperty("ADMIN_EMAIL");
+  if (!adminEmail) return;
+  var subject = "⚠ بازرسی ناموفق حیاتی: " + (rec.assetCode || "") + " - " + (rec.templateTitle || rec.templateName || "");
+  var body = "یک بازرسی با نتیجه «ناموفق حیاتی» ثبت شد.\n\n" +
+    "تجهیز: " + (rec.assetCode || "—") + "\n" +
+    "بازرس: " + (rec.inspector || rec.inspectorName || "—") + "\n" +
+    "درصد: " + (rec.percent || 0) + "%\n" +
+    "لینک فایل: " + fileUrl;
+  MailApp.sendEmail(adminEmail, subject, body);
+}
+
+// =====================================================================
+// نسخه پشتیبان کامل
+// =====================================================================
+function handleBackup(data, rootFolder) {
+  var backupFolder = getOrCreateFolder(rootFolder, "پشتیبان کامل");
+  var backupName = "پشتیبان_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + new Date().getTime() + ".json";
+  var backupPayload = data.payload || data.data || {};
+  var backupFile = backupFolder.createFile(backupName, JSON.stringify(backupPayload, null, 2), MimeType.PLAIN_TEXT);
+  purgeOldBackups(backupFolder, 20); // فقط ۲۰ نسخه پشتیبان آخر نگه داشته می‌شود
+  return { ok: true, status: "success", message: "نسخه پشتیبان در Google Drive ذخیره شد", fileUrl: backupFile.getUrl() };
+}
+
+function purgeOldBackups(folder, keep) {
+  var files = folder.getFiles();
+  var list = [];
+  while (files.hasNext()) list.push(files.next());
+  list.sort(function (a, b) { return b.getDateCreated() - a.getDateCreated(); });
+  for (var i = keep; i < list.length; i++) list[i].setTrashed(true);
+}
+
+// =====================================================================
+// پایگاه داده ابری (هم‌گام‌سازی چندکاربره/چنددستگاهی)
+// =====================================================================
+function handleCloudPush(data, rootFolder) {
+  var cloudFolder = getOrCreateFolder(rootFolder, "پایگاه ابری");
+  var payload = { version: 1, updatedAt: new Date().toISOString(), meta: data.meta, data: data.data, deleted: data.deleted || {} };
+  saveCloudFile(cloudFolder, payload);
+  return { ok: true, status: "success", message: "اطلاعات در ابر ذخیره شد.", meta: data.meta, updatedAt: payload.updatedAt };
+}
+
+function handleCloudPull(rootFolder) {
+  var cloudFolder = getOrCreateFolder(rootFolder, "پایگاه ابری");
+  var stored = readCloudFile(cloudFolder);
+  if (!stored) return { ok: true, status: "success", message: "در ابر اطلاعاتی وجود ندارد.", meta: null, data: null, deleted: null };
+  return { ok: true, status: "success", message: "دریافت از ابر انجام شد.", meta: stored.meta, data: stored.data, deleted: stored.deleted, updatedAt: stored.updatedAt };
+}
+
+function handleCloudMeta(rootFolder) {
+  var cloudFolder = getOrCreateFolder(rootFolder, "پایگاه ابری");
+  var stored = readCloudFile(cloudFolder);
+  if (!stored) return { ok: true, status: "success", exists: false, meta: null };
+  var d = stored.data || {};
+  return {
+    ok: true, status: "success", exists: true, meta: stored.meta, updatedAt: stored.updatedAt,
+    counts: {
+      templates: (d.templates || []).length, records: (d.records || []).length,
+      users: (d.users || []).length, assets: (d.assets || []).length, assignments: (d.assignments || []).length
+    }
+  };
+}
+
+function saveCloudFile(cloudFolder, payload) {
+  var files = cloudFolder.getFilesByName("darkav-cloud-db.json");
+  var content = JSON.stringify(payload);
+  if (files.hasNext()) files.next().setContent(content);
+  else cloudFolder.createFile("darkav-cloud-db.json", content, MimeType.PLAIN_TEXT);
+}
+
+function readCloudFile(cloudFolder) {
+  var files = cloudFolder.getFilesByName("darkav-cloud-db.json");
+  if (!files.hasNext()) return null;
+  try { return JSON.parse(files.next().getBlob().getDataAsString()); } catch (e) { return null; }
+}
+
+// =====================================================================
+// فهرست، حذف و تاییدیه‌ی سوابق (از روی شیت تجمیعی)
+// =====================================================================
+function getRecordsSheet(rootFolder) {
+  var sheetName = "گزارش تجمیعی بازرسی‌ها (اکسل درکاو)";
+  var files = rootFolder.getFilesByName(sheetName);
+  if (!files.hasNext()) return null;
+  return SpreadsheetApp.open(files.next()).getActiveSheet();
+}
+
+function handleListRecords(rootFolder, data) {
+  var sheet = getRecordsSheet(rootFolder);
+  if (!sheet) return { ok: true, status: "success", records: [] };
+  var values = sheet.getDataRange().getValues();
+  var headers = values.shift();
+  var limit = Number(data.limit) || 200;
+  var offset = Number(data.offset) || 0;
+  var filterCat = data.category || null;
+  var filterAsset = data.assetCode || null;
+
+  var rows = values.map(function (row) {
+    var obj = {};
+    headers.forEach(function (h, i) { obj[h] = row[i]; });
+    return obj;
+  }).filter(function (r) {
+    if (filterCat && r["دسته‌بندی"] !== filterCat) return false;
+    if (filterAsset && r["کد تجهیز"] !== filterAsset) return false;
+    return true;
+  });
+
+  rows.reverse(); // جدیدترین‌ها ابتدا
+  var page = rows.slice(offset, offset + limit);
+  return { ok: true, status: "success", total: rows.length, offset: offset, limit: limit, records: page };
+}
+
+function handleDeleteRecord(rootFolder, data) {
+  var fileUrl = data.fileUrl;
+  if (!fileUrl) return { ok: false, status: "error", error: "fileUrl ارسال نشده است." };
+  var idMatch = fileUrl.match(/[-\w]{25,}/);
+  if (!idMatch) return { ok: false, status: "error", error: "شناسه فایل از روی لینک قابل استخراج نیست." };
+  try {
+    var file = DriveApp.getFileById(idMatch[0]);
+    file.setTrashed(true);
+    return { ok: true, status: "success", message: "فایل به سطل زباله گوگل درایو منتقل شد." };
+  } catch (e) {
+    return { ok: false, status: "error", error: "فایل یافت نشد یا قابل حذف نیست: " + e.toString() };
+  }
+}
+
+function handleApproveRecord(rootFolder, data) {
+  var approvalFolder = getOrCreateFolder(rootFolder, "تاییدیه‌ها");
+  var entry = {
+    fileUrl: data.fileUrl || "", recordId: data.recordId || "",
+    decision: data.decision === "reject" ? "رد شده" : "تایید شده",
+    approverName: data.approverName || "—", note: data.note || "",
+    approvedAt: toJalaliDateTime(new Date())
+  };
+  var name = "تاییدیه_" + toJalaliDate(new Date()).replace(/\//g, "-") + "_" + (data.recordId || "").slice(-6) + ".json";
+  var file = approvalFolder.createFile(name, JSON.stringify(entry, null, 2), MimeType.PLAIN_TEXT);
+  return { ok: true, status: "success", message: "تاییدیه ثبت شد.", fileUrl: file.getUrl(), entry: entry };
+}
+
+function handleExportZip(rootFolder, data) {
+  var year = data.year, month = data.month; // مثل "1404" و "05-مرداد"
+  if (!year || !month) return { ok: false, status: "error", error: "سال و ماه شمسی باید ارسال شود." };
+  var yearFolders = rootFolder.getFoldersByName(year);
+  if (!yearFolders.hasNext()) return { ok: false, status: "error", error: "پوشه‌ی این سال یافت نشد." };
+  var yearFolder = yearFolders.next();
+  var monthFolders = yearFolder.getFoldersByName(month);
+  if (!monthFolders.hasNext()) return { ok: false, status: "error", error: "پوشه‌ی این ماه یافت نشد." };
+  var monthFolder = monthFolders.next();
+
+  var blobs = [];
+  collectPdfBlobs(monthFolder, blobs);
+  if (blobs.length === 0) return { ok: false, status: "error", error: "هیچ فایل PDF ای برای این بازه یافت نشد." };
+
+  var zipBlob = Utilities.zip(blobs, year + "_" + month + ".zip");
+  var exportFolder = getOrCreateFolder(rootFolder, "خروجی‌های فشرده");
+  var zipFile = exportFolder.createFile(zipBlob);
+  return { ok: true, status: "success", message: "فایل ZIP ساخته شد.", fileUrl: zipFile.getUrl(), count: blobs.length };
+}
+
+function collectPdfBlobs(folder, blobs) {
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var f = files.next();
+    if (f.getMimeType() === MimeType.PDF) blobs.push(f.getBlob());
+  }
+  var subFolders = folder.getFolders();
+  while (subFolders.hasNext()) collectPdfBlobs(subFolders.next(), blobs);
+}
+
+// =====================================================================
+// ساخت فایل PDF (از Base64 آماده یا از HTML)
+// =====================================================================
+function saveBase64Pdf(folder, baseName, pdfBase64) {
+  var bytes = Utilities.base64Decode(pdfBase64);
+  var blob = Utilities.newBlob(bytes, "application/pdf", baseName + ".pdf");
+  return folder.createFile(blob);
+}
+
+function createPdfFromHtml(folder, baseName, html, rec) {
+  if (html && html.length > 20) {
+    try {
+      var htmlBlob = Utilities.newBlob(html, "text/html", baseName + ".html");
+      var pdfFromHtml = htmlBlob.getAs("application/pdf");
+      pdfFromHtml.setName(baseName + ".pdf");
+      return folder.createFile(pdfFromHtml);
+    } catch (htmlErr) {
+      // در صورت شکست تبدیل مستقیم، به روش Google Docs زیر برمی‌گردیم
+    }
+  }
+
+  var doc = null;
+  try {
+    doc = DocumentApp.create(baseName);
+    var body = doc.getBody();
+    var title = body.appendParagraph(rec.templateTitle || rec.templateName || "گزارش بازرسی");
+    title.setHeading(DocumentApp.ParagraphHeading.HEADING1);
+    title.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    if (rec.category) {
+      var catP = body.appendParagraph(rec.category);
+      catP.setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    }
+    body.appendHorizontalRule();
+    var infoRows = [
+      ["بازرس", String(rec.inspector || rec.inspectorName || "—"), "محل", String(rec.location || "—")],
+      ["تجهیز", rec.assetCode ? (rec.assetCode + " - " + (rec.assetTitle || "")) : "—", "تاریخ", toJalaliDateTime(new Date(rec.completedAt || rec.startedAt || new Date()))],
+      ["امتیاز", (rec.score || 0) + " از " + (rec.maxScore || 0), "درصد", (rec.percent || 0) + "%"],
+    ];
+    var infoTable = body.appendTable(infoRows);
+    styleInfoTable(infoTable);
+    var answers = rec.answers || rec.details || [];
+    if (answers.length > 0) {
+      var tableData = [["#", "آیتم", "پاسخ", "نتیجه", "یادداشت"]];
+      for (var i = 0; i < answers.length; i++) {
+        var a = answers[i];
+        var valStr = a.value === true ? "بله" : a.value === false ? "خیر" : String(a.value == null ? "—" : a.value);
+        tableData.push([String(i + 1), String(a.itemText || a.label || ""), valStr, a.passed ? "قبول" : "رد", String(a.note || "")]);
+      }
+      var itemsTable = body.appendTable(tableData);
+      styleItemsTable(itemsTable);
+    }
+    if (rec.overallNote) body.appendParagraph("یادداشت کلی: " + rec.overallNote);
+    body.appendHorizontalRule();
+    var signTable = body.appendTable([["امضای بازرس / اجراکننده", "امضای ناظر / تحویل‌گیرنده"]]);
+    var signRow = signTable.appendTableRow();
+    insertSignatureCell(signRow.appendTableCell(), rec.executorSignature);
+    insertSignatureCell(signRow.appendTableCell(), rec.approverSignature);
+    doc.saveAndClose();
+    var docDriveFile = DriveApp.getFileById(doc.getId());
+    var pdfBlob = docDriveFile.getAs(MimeType.PDF);
+    pdfBlob.setName(baseName + ".pdf");
+    var pdfFile = folder.createFile(pdfBlob);
+    docDriveFile.setTrashed(true);
+    return pdfFile;
+  } catch (err) {
+    try { if (doc) DriveApp.getFileById(doc.getId()).setTrashed(true); } catch (e2) {}
+    return folder.createFile(baseName + ".html", html || JSON.stringify(rec), MimeType.HTML);
+  }
+}
+
+function insertSignatureCell(cell, sig) {
+  try {
+    cell.clear();
+    if (sig && sig.imageData && sig.imageData.indexOf("base64,") !== -1) {
+      var base64 = sig.imageData.split("base64,")[1];
+      var bytes = Utilities.base64Decode(base64);
+      var blob = Utilities.newBlob(bytes, "image/png", "sig.png");
+      var img = cell.appendImage(blob);
+      var w = 150;
+      img.setWidth(w);
+      img.setHeight(Math.round(w * (img.getHeight() / img.getWidth())) || 55);
+      if (sig.signerName) cell.appendParagraph(sig.signerName).editAsText().setFontSize(9).setBold(true);
+    } else {
+      cell.appendParagraph(sig && sig.signerName ? sig.signerName : "— بدون امضا —").editAsText().setFontSize(9);
+    }
+  } catch (e) {
+    cell.appendParagraph("—");
+  }
+}
+
+function styleInfoTable(table) {
+  try {
+    table.setBorderColor("#cbd5e1");
+    for (var r = 0; r < table.getNumRows(); r++) {
+      var row = table.getRow(r);
+      for (var c = 0; c < row.getNumCells(); c++) {
+        var cell = row.getCell(c);
+        cell.editAsText().setFontSize(9);
+        if (c === 0 || c === 2) { cell.editAsText().setBold(true); cell.setBackgroundColor("#f1f5f9"); }
+      }
+    }
+  } catch (e) {}
+}
+
+function styleItemsTable(table) {
+  try {
+    table.setBorderColor("#cbd5e1");
+    var header = table.getRow(0);
+    for (var c = 0; c < header.getNumCells(); c++) {
+      header.getCell(c).setBackgroundColor("#eef2ff").editAsText().setBold(true).setFontSize(9);
+    }
+    for (var r = 1; r < table.getNumRows(); r++) {
+      var row = table.getRow(r);
+      for (var cc = 0; cc < row.getNumCells(); cc++) row.getCell(cc).editAsText().setFontSize(9);
+    }
+  } catch (e) {}
+}
+
+// =====================================================================
+// شیت تجمیعی
+// =====================================================================
+function recordToSpreadsheet(rootFolder, rec, fileUrl) {
+  var sheetName = "گزارش تجمیعی بازرسی‌ها (اکسل درکاو)";
+  var files = rootFolder.getFilesByName(sheetName);
+  var ss;
+  if (files.hasNext()) {
+    ss = SpreadsheetApp.open(files.next());
+  } else {
+    ss = SpreadsheetApp.create(sheetName);
+    var driveFile = DriveApp.getFileById(ss.getId());
+    rootFolder.addFile(driveFile);
+    DriveApp.getRootFolder().removeFile(driveFile);
+    var firstSheet = ss.getActiveSheet();
+    firstSheet.setName("سوابق بازرسی");
+    firstSheet.appendRow([
+      "تاریخ (شمسی)", "کد تجهیز", "عنوان چک‌لیست", "دسته‌بندی", "محل",
+      "نام بازرس", "امتیاز کسب‌شده", "درصد موفقیت", "نتیجه بازرسی", "لینک فایل در گوگل درایو"
+    ]);
+  }
+
+  var sheet = ss.getActiveSheet();
+  var resultText = rec.criticalFail ? "ناموفق (حیاتی)" : (rec.percent >= 75 ? "عالی / قبول" : "نیاز به اصلاح");
+  sheet.appendRow([
+    toJalaliDateTime(new Date(rec.completedAt || rec.startedAt || new Date())),
+    rec.assetCode || "—", rec.templateTitle || rec.templateName || "", rec.category || "", rec.location || "—",
+    rec.inspector || rec.inspectorName || "—", (rec.score || 0) + " از " + (rec.maxScore || 0),
+    (rec.percent || 0) + "%", resultText, fileUrl
+  ]);
+  return ss.getUrl();
+}
+
+// =====================================================================
+// لاگ حسابرسی (کدام کاربر/کلید چه عملیاتی در چه زمانی انجام داد)
+// =====================================================================
+function logAction(rootFolder, action, data, result) {
+  try {
+    var logFolder = getOrCreateFolder(rootFolder, "لاگ سیستم");
+    var name = "لاگ_" + jalaliYear(new Date()) + "_" + jalaliMonthFolder(new Date()) + ".csv";
+    var files = logFolder.getFilesByName(name);
+    var line = [
+      new Date().toISOString(), action,
+      (data.record && (data.record.inspector || data.record.inspectorName)) || "",
+      result && result.ok ? "OK" : "ERROR"
+    ].join(",") + "\n";
+    if (files.hasNext()) {
+      var f = files.next();
+      f.setContent(f.getBlob().getDataAsString() + line);
+    } else {
+      logFolder.createFile(name, "زمان,عملیات,کاربر,نتیجه\n" + line, MimeType.PLAIN_TEXT);
+    }
+  } catch (e) {
+    // لاگ هرگز نباید باعث شکست عملیات اصلی شود
+  }
+}
+
+// =====================================================================
+// توابع کمکی عمومی
+// =====================================================================
+function doGet(e) {
+  return responseJson({ ok: true, status: "success", message: "وب‌سرویس سامانه چک‌لیست درکاو فعال و آماده دریافت است.", version: "7.0" });
+}
+
+function getOrCreateFolder(parent, name) {
+  var folders = parent.getFoldersByName(name);
+  if (folders.hasNext()) return folders.next();
+  return parent.createFolder(name);
+}
+
+function cleanName(str) {
+  return String(str || "").replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
+function responseJson(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+`;
+
+// فراخوانی عمومی وب‌سرویس Google Apps Script؛ برای همه‌ی عملیات (ذخیره، پشتیبان‌گیری،
+// هم‌گام‌سازی ابری و ...) از این تابع استفاده می‌شود. content-type به‌عمد text/plain
+// نگه داشته شده تا مرورگر درخواست OPTIONS (preflight) که Apps Script پشتیبانی نمی‌کند
+// ارسال نکند.
+async function callAppsScript(url, org, payload) {
+  if (!url) throw new Error('آدرس اسکریپت گوگل در تنظیمات وارد نشده است.');
+  const body = Object.assign({ apiKey: org.cloudApiKey || '' }, payload);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body),
+  });
+  let json;
+  try { json = await res.json(); }
+  catch (e) { throw new Error('پاسخ سرور قابل خواندن نبود (ممکن است آدرس اسکریپت نادرست باشد).'); }
+  if (!json || json.ok === false) throw new Error((json && (json.error || json.message)) || 'خطای نامشخص از سرور.');
+  return json;
+}
+
+async function sendRecordToAppsScript(url, record, org, notify) {
+  try {
+    const html = `<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><style>${REPORT_STYLE}</style></head><body>${recordReportHtml(record, org)}</body></html>`;
+    const json = await callAppsScript(url, org, {
+      action: 'save_pdf',
+      folderName: (org.orgName ? org.orgName + ' - ' : '') + 'سامانه چک‌لیست درکاو',
+      record: {
+        id: record.id, assetCode: record.assetCode, assetTitle: record.assetTitle,
+        templateTitle: record.templateName, category: record.category || 'عمومی',
+        inspector: record.inspectorName, location: record.location || '',
+        completedAt: record.completedAt || new Date().toISOString(),
+        percent: record.percent, status: record.status, criticalFail: !!record.criticalFail,
+        score: record.score || 0, maxScore: record.maxScore || 0,
+      },
+      html,
+    });
+    notify('فایل PDF بازرسی در Google Drive ذخیره شد.', 'success');
+    return json;
+  } catch (e) {
+    notify('ذخیره در Google Drive ناموفق بود: ' + e.message, 'error');
+  }
+}
+
+// ارسال نسخه پشتیبان کامل به Google Drive (علاوه بر دانلود محلی)
+async function pushCloudBackup(url, org, fullData, notify) {
+  try {
+    await callAppsScript(url, org, { action: 'backup', payload: fullData });
+    notify('نسخه پشتیبان در Google Drive ذخیره شد.', 'success');
+  } catch (e) { notify('پشتیبان‌گیری ابری ناموفق بود: ' + e.message, 'error'); }
+}
+
+// ارسال کامل داده‌های برنامه به پایگاه ابری (برای هم‌گام‌سازی چندکاربره/چنددستگاهی)
+async function cloudPush(url, org, fullData, notify) {
+  try {
+    await callAppsScript(url, org, { action: 'cloud_push', meta: { device: navigator.userAgent, at: new Date().toISOString() }, data: fullData });
+    notify('اطلاعات با موفقیت در پایگاه ابری ذخیره شد.', 'success');
+  } catch (e) { notify('ارسال به پایگاه ابری ناموفق بود: ' + e.message, 'error'); }
+}
+
+// دریافت کامل داده‌ها از پایگاه ابری (برای بازیابی روی دستگاه/کاربر دیگر)
+async function cloudPull(url, org, notify) {
+  try {
+    const json = await callAppsScript(url, org, { action: 'cloud_pull' });
+    if (!json.data) { notify('در پایگاه ابری هنوز اطلاعاتی ذخیره نشده است.', 'info'); return null; }
+    notify('اطلاعات از پایگاه ابری دریافت شد.', 'success');
+    return json.data;
+  } catch (e) { notify('دریافت از پایگاه ابری ناموفق بود: ' + e.message, 'error'); return null; }
+}
+
+async function testAppsScriptConnection(url, org, notify) {
+  try {
+    const json = await callAppsScript(url, org, { action: 'ping', folderName: (org.orgName ? org.orgName + ' - ' : '') + 'سامانه چک‌لیست درکاو' });
+    notify('اتصال برقرار است — نسخه سرور: ' + (json.version || '؟'), 'success');
+  } catch (e) { notify('اتصال ناموفق بود: ' + e.message, 'error'); }
+}
+
+/* ============================================================
+   ۱۸. صفحه تنظیمات
+   ============================================================ */
+function SettingsPage() {
+  const { data, update, notify, verifyManagerPin } = useAppData();
+  const [org, setOrg] = useState(data.settings.orgName);
+  const [threshold, setThreshold] = useState(data.settings.passThreshold);
+  const [newCategory, setNewCategory] = useState('');
+  const [gasUrl, setGasUrl] = useState(data.settings.googleAppsScriptUrl || '');
+  const [clientId, setClientId] = useState(data.settings.googleClientId || '');
+  const [apiKey, setApiKey] = useState(data.settings.cloudApiKey || '');
+  const [testing, setTesting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [pin, setPin] = useState('');
+  const [pinConfirm, setPinConfirm] = useState('');
+  const [copyDone, setCopyDone] = useState(false);
+  const fileInputRef = useRef(null);
+  const restoreInputRef = useRef(null);
+  const [confirmRestore, setConfirmRestore] = useState(null);
+
+  const saveOrg = () => {
+    update(d => { d.settings.orgName = org; d.settings.passThreshold = Number(toEnglishDigits(threshold)) || 80; });
+    notify('اطلاعات سازمان ذخیره شد.', 'success');
+  };
+
+  const onLogoChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      update(d => { d.settings.logoDataUrl = reader.result; });
+      notify('لوگو بارگذاری شد.', 'success');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const addCategory = () => {
+    if (!newCategory.trim()) return;
+    update(d => { if (!d.categories.includes(newCategory.trim())) d.categories.push(newCategory.trim()); });
+    setNewCategory('');
+  };
+  const removeCategory = (c) => update(d => { d.categories = d.categories.filter(x => x !== c); });
+
+  const saveGoogle = () => {
+    update(d => { d.settings.googleAppsScriptUrl = gasUrl.trim(); d.settings.googleClientId = clientId.trim(); d.settings.cloudApiKey = apiKey.trim(); });
+    notify('تنظیمات گوگل درایو ذخیره شد.', 'success');
+  };
+
+  const testConnection = async () => {
+    if (!gasUrl.trim()) { notify('ابتدا آدرس وب‌اپ اسکریپت را وارد و ذخیره کنید.', 'error'); return; }
+    setTesting(true);
+    await testAppsScriptConnection(gasUrl.trim(), { ...data.settings, cloudApiKey: apiKey.trim() }, notify);
+    setTesting(false);
+  };
+
+  const doCloudPush = async () => {
+    if (!gasUrl.trim()) { notify('ابتدا آدرس وب‌اپ اسکریپت را وارد و ذخیره کنید.', 'error'); return; }
+    setSyncing(true);
+    await cloudPush(gasUrl.trim(), { ...data.settings, cloudApiKey: apiKey.trim() }, data, notify);
+    setSyncing(false);
+  };
+
+  const doCloudPull = async () => {
+    if (!gasUrl.trim()) { notify('ابتدا آدرس وب‌اپ اسکریپت را وارد و ذخیره کنید.', 'error'); return; }
+    if (!window.confirm('اطلاعات فعلی این دستگاه با آخرین نسخه‌ی ابری جایگزین می‌شود. آیا مطمئن هستید؟')) return;
+    setSyncing(true);
+    const cloudData = await cloudPull(gasUrl.trim(), { ...data.settings, cloudApiKey: apiKey.trim() }, notify);
+    if (cloudData) update(d => { Object.assign(d, migrateData(cloudData)); });
+    setSyncing(false);
+  };
+
+  const copyScript = async () => {
+    try { await navigator.clipboard.writeText(APPS_SCRIPT_CODE); setCopyDone(true); setTimeout(() => setCopyDone(false), 2000); }
+    catch (e) { notify('کپی خودکار پشتیبانی نمی‌شود.', 'error'); }
+  };
+
+  const oauthLogin = () => {
+    if (!clientId.trim()) { notify('ابتدا Client ID گوگل را وارد و ذخیره کنید.', 'error'); return; }
+    if (!window.google || !window.google.accounts) { notify('کتابخانه Google Identity Services بارگذاری نشده است.', 'error'); return; }
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId.trim(),
+      scope: 'https://www.googleapis.com/auth/drive.file',
+      callback: (resp) => {
+        if (resp && resp.access_token) notify('اتصال مستقیم به Google Drive برقرار شد.', 'success');
+        else notify('ورود گوگل ناموفق بود.', 'error');
+      },
+    });
+    client.requestAccessToken();
+  };
+
+  const savePin = async () => {
+    if (!pin || pin.length < 4) { notify('پین باید حداقل ۴ رقم باشد.', 'error'); return; }
+    if (pin !== pinConfirm) { notify('تکرار پین با پین وارد‌شده مطابقت ندارد.', 'error'); return; }
+    const hash = await sha256Hex(pin);
+    update(d => { d.settings.managerPinHash = hash; });
+    setPin(''); setPinConfirm('');
+    notify('پین‌کد مدیریت به‌روزرسانی شد.', 'success');
+  };
+
+  const doBackup = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    downloadDataUrl(URL.createObjectURL(blob), `پشتیبان-درکاو-${Date.now()}.json`);
+  };
+
+  const onRestoreFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const err = validateBackupShape(parsed);
+        if (err) { notify(err, 'error'); return; }
+        setConfirmRestore(parsed);
+      } catch (err) { notify('فایل JSON نامعتبر است.', 'error'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const doRestore = () => {
+    update(d => { Object.assign(d, migrateData(confirmRestore)); });
+    setConfirmRestore(null);
+    notify('بازیابی اطلاعات با موفقیت انجام شد.', 'success');
+  };
+
+  return (
+    <div className="space-y-6 max-w-3xl">
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 className="font-bold text-slate-800">اطلاعات سازمان</h3>
+        <Field label="نام سازمان"><input className={inputCls} value={org} onChange={e => setOrg(e.target.value)} /></Field>
+        <Field label="حد نصاب پیش‌فرض قبولی (%)"><input type="number" className={inputCls} value={threshold} onChange={e => setThreshold(e.target.value)} /></Field>
+        <Field label="لوگوی سازمان">
+          <input ref={fileInputRef} type="file" accept="image/*" onChange={onLogoChange} className="text-sm" />
+          {data.settings.logoDataUrl && <img src={data.settings.logoDataUrl} className="h-12 mt-2" />}
+        </Field>
+        <button onClick={saveOrg} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره</button>
+      </section>
+
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 className="font-bold text-slate-800">دسته‌بندی‌های تجهیزات و چک‌لیست‌ها</h3>
+        <div className="flex flex-wrap gap-2">
+          {data.categories.map(c => (
+            <span key={c} className="flex items-center gap-1.5 bg-slate-100 rounded-full px-3 py-1.5 text-sm">
+              {c}
+              <button onClick={() => removeCategory(c)} className="text-slate-400 hover:text-danger-500">✕</button>
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input className={inputCls} value={newCategory} onChange={e => setNewCategory(e.target.value)} placeholder="دسته‌بندی جدید" />
+          <button onClick={addCategory} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-sm shrink-0">افزودن</button>
+        </div>
+      </section>
+
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+        <h3 className="font-bold text-slate-800">اتصال دوگانه به Google Drive</h3>
+        <div className="bg-brand-50 border border-brand-100 rounded-xl p-3.5 text-sm space-y-2">
+          <p className="font-medium text-brand-800">روش اول (پیشنهادی): پل Google Apps Script</p>
+          <Field label="آدرس وب‌اپ منتشرشده (Web App URL)">
+            <input className={inputCls} dir="ltr" value={gasUrl} onChange={e => setGasUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec" />
+          </Field>
+          <Field label="کلید API (از Script Properties با نام API_KEY)" hint="این کلید هر درخواست را به سرور شما شناسایی می‌کند؛ بدون آن سرور درخواست‌ها را رد می‌کند.">
+            <input className={inputCls} dir="ltr" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="یک رشته تصادفی و طولانی" />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={copyScript} className="px-3.5 py-2 rounded-xl bg-white border border-brand-200 text-sm text-brand-700 hover:bg-brand-100">
+              {copyDone ? '✔ کد کپی شد' : '📋 کپی کد کامل Google Apps Script'}
+            </button>
+            <button onClick={testConnection} disabled={testing} className="px-3.5 py-2 rounded-xl bg-white border border-brand-200 text-sm text-brand-700 hover:bg-brand-100 disabled:opacity-50">
+              {testing ? 'در حال بررسی…' : '🔌 تست اتصال'}
+            </button>
+          </div>
+        </div>
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-sm space-y-2">
+          <p className="font-medium text-slate-700">روش دوم: ورود مستقیم با Google OAuth (Drive API v3)</p>
+          <Field label="Google OAuth Client ID">
+            <input className={inputCls} dir="ltr" value={clientId} onChange={e => setClientId(e.target.value)} placeholder="xxxxxxxx.apps.googleusercontent.com" />
+          </Field>
+          <button onClick={oauthLogin} className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-sm hover:bg-slate-100">ورود با Google</button>
+        </div>
+        <button onClick={saveGoogle} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره تنظیمات گوگل درایو</button>
+      </section>
+
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 className="font-bold text-slate-800">هم‌گام‌سازی ابری چندکاربره/چنددستگاهی</h3>
+        <p className="text-xs text-slate-400">
+          با این قابلیت می‌توانید کل اطلاعات برنامه (تجهیزات، قالب‌ها، کاربران و سوابق) را در یک فایل
+          مشترک روی Google Drive ذخیره و از دستگاه‌های دیگر دریافت کنید. پیش از «دریافت»، حتماً یک
+          نسخه پشتیبان محلی بگیرید چون داده‌های فعلی این دستگاه جایگزین می‌شود.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={doCloudPush} disabled={syncing} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-50">
+            ⬆️ ارسال اطلاعات این دستگاه به پایگاه ابری
+          </button>
+          <button onClick={doCloudPull} disabled={syncing} className="px-4 py-2 rounded-xl text-sm border border-danger-200 text-danger-700 hover:bg-danger-50 disabled:opacity-50">
+            ⬇️ دریافت و جایگزینی با آخرین نسخه ابری
+          </button>
+        </div>
+      </section>
+
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 className="font-bold text-slate-800">پین‌کد مدیریت (Manager PIN)</h3>
+        <p className="text-xs text-slate-400">این پین برای تأیید عملیات حساس مدیریتی استفاده می‌شود و به‌صورت هش‌شده ذخیره می‌گردد.</p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="پین جدید"><input type="password" className={inputCls} value={pin} onChange={e => setPin(e.target.value)} /></Field>
+          <Field label="تکرار پین"><input type="password" className={inputCls} value={pinConfirm} onChange={e => setPinConfirm(e.target.value)} /></Field>
+        </div>
+        <button onClick={savePin} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">ذخیره پین</button>
+      </section>
+
+      <section className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3">
+        <h3 className="font-bold text-slate-800">پشتیبان‌گیری و بازیابی</h3>
+        <div className="flex gap-2">
+          <button onClick={doBackup} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-sm">⬇️ دانلود پشتیبان کامل (JSON)</button>
+          <button onClick={() => restoreInputRef.current.click()} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-sm">⬆️ بازیابی از فایل</button>
+          <input ref={restoreInputRef} type="file" accept="application/json" onChange={onRestoreFile} className="hidden" />
+        </div>
+      </section>
+
+      <ConfirmDialog open={!!confirmRestore} danger title="بازیابی اطلاعات"
+        message="تمام داده‌های فعلی سامانه با محتوای فایل پشتیبان جایگزین خواهد شد. این عملیات قابل بازگشت نیست."
+        onConfirm={doRestore} onCancel={() => setConfirmRestore(null)} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۱۹. صفحه راهنما و سند مرجع
+   ============================================================ */
+function HelpPage() {
+  const { currentUser } = useAppData();
+  return (
+    <div className="space-y-5 max-w-3xl">
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 text-sm text-slate-600 leading-7">
+        <h3 className="font-bold text-slate-800 text-base">راهنمای استفاده از سامانه چک‌لیست درکاو</h3>
+        <p>۱. از منوی «تجهیزات» می‌توانید بارکد هر تابلو را مشاهده، چاپ یا دانلود کنید و یا با دوربین گوشی برچسب را اسکن کنید.</p>
+        <p>۲. از منوی «اجرای بازرسی» یک تجهیز و قالب چک‌لیست را انتخاب و آیتم‌ها را تکمیل کنید؛ در پایان امضای بازرس الزامی و امضای ناظر اختیاری است.</p>
+        <p>۳. در «سوابق»، می‌توانید چاپ تکی، پشت‌سرهم، تجمیعی و خروجی اکسل/CSV بگیرید.</p>
+        <p>۴. آیتم‌های «حیاتی» در صورت رد شدن، نتیجه را به‌طور خودکار «ناموفق (حیاتی)» می‌کنند، حتی اگر درصد امتیاز بالا باشد.</p>
+        <p>۵. اتصال گوگل درایو در «تنظیمات» با روش Apps Script (بدون نیاز به کلود گوگل) یا OAuth مستقیم قابل پیکربندی است.</p>
+      </div>
+      {currentUser.role === 'admin' && (
+        <div className="bg-slate-900 text-slate-200 rounded-2xl p-5 text-xs leading-6">
+          <p className="text-slate-400 mb-2">این بخش، سند مشخصات فنی مرجع پروژه برای استفاده‌های آتی ادمین است (فقط برای نقش ادمین نمایش داده می‌شود).</p>
+          <p>سامانه بر پایه React + Tailwind با ذخیره‌سازی محلی (localStorage)، هش SHA-256 برای گذرواژه‌ها، بارکد QR وکتور SVG، اسکنر دوربین زنده، تقویم شمسی، امضای دیجیتال تمام‌صفحه، موتور خروجی چندگانه (تکی/پشت‌سرهم/تجمیعی/اکسل/CSV)، واگذاری وظیفه به کاربران، دسترسی سطح‌بندی‌شده به‌ازای هر کاربر و اتصال دوگانه به Google Drive ساخته شده است.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   ۲۰. داشبورد
+   ============================================================ */
+function DashboardPage({ goPage, goRunner }) {
+  const { data, currentUser } = useAppData();
+  const total = data.records.length;
+  const success = data.records.filter(r => r.status === 'موفق').length;
+  const criticalFails = data.records.filter(r => r.status === 'ناموفق (حیاتی)').length;
+  const avg = total ? Math.round(data.records.reduce((s, r) => s + r.percent, 0) / total) : 0;
+  const recent = data.records.slice(0, 5);
+  const myPendingTasks = data.assignments.filter(a => a.assignedToUserId === currentUser.id && a.status !== 'done');
+  const myOverdueTasks = myPendingTasks.filter(isAssignmentOverdue);
+
+  const stat = (label, value, tone) => (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4">
+      <p className="text-xs text-slate-400 mb-1">{label}</p>
+      <p className={"text-2xl font-black " + (tone || "text-slate-800")}>{value}</p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-bold text-slate-800">سلام، {currentUser.name} 👋</h2>
+        <p className="text-sm text-slate-500">نمای کلی از وضعیت بازرسی‌های تجهیزات</p>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {stat('کل بازرسی‌ها', toPersianDigits(total))}
+        {stat('موفق', toPersianDigits(success), 'text-ok-700')}
+        {stat('ناموفق حیاتی', toPersianDigits(criticalFails), 'text-danger-700')}
+        {stat('میانگین امتیاز', toPersianDigits(avg) + '٪', 'text-brand-700')}
+      </div>
+      {myPendingTasks.length > 0 && (
+        <button onClick={() => goPage('tasks')} className="w-full text-right bg-warn-50 border border-warn-500/30 hover:bg-warn-500/10 rounded-2xl p-4 flex items-center justify-between">
+          <div>
+            <p className="font-bold text-warn-800">🗒️ {toPersianDigits(myPendingTasks.length)} وظیفه در انتظار انجام شما</p>
+            {myOverdueTasks.length > 0 && <p className="text-xs text-danger-700 mt-1">{toPersianDigits(myOverdueTasks.length)} مورد دارای دیرکرد است</p>}
+          </div>
+          <span className="text-warn-700 text-sm">مشاهده وظایف ←</span>
+        </button>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <button onClick={() => goPage('assets')} className="bg-brand-600 hover:bg-brand-700 text-white rounded-2xl p-5 text-right">
+          <p className="font-bold mb-1">📷 اسکن و اجرای بازرسی</p>
+          <p className="text-sm text-brand-100">اسکن بارکد تجهیز یا انتخاب دستی از فهرست تجهیزات</p>
+        </button>
+        <button onClick={() => goPage('records')} className="bg-white border border-slate-200 hover:bg-slate-50 rounded-2xl p-5 text-right">
+          <p className="font-bold mb-1 text-slate-800">🗂️ مشاهده سوابق و خروجی‌ها</p>
+          <p className="text-sm text-slate-500">چاپ، اکسل و CSV سوابق بازرسی</p>
+        </button>
+      </div>
+      <div className="bg-white rounded-2xl border border-slate-200">
+        <div className="p-4 border-b border-slate-100 font-bold text-slate-800 text-sm">آخرین بازرسی‌ها</div>
+        <div className="divide-y divide-slate-100">
+          {recent.map(r => (
+            <div key={r.id} className="p-4 flex items-center justify-between text-sm">
+              <div>
+                <p className="font-medium text-slate-800">{r.assetCode} — {r.templateName}</p>
+                <p className="text-xs text-slate-400" dir="ltr">{toPersianDigits(r.date)} · {r.inspectorName}</p>
+              </div>
+              <StatusBadge status={r.status} />
+            </div>
+          ))}
+          {recent.length === 0 && <p className="p-6 text-center text-slate-400 text-sm">هنوز بازرسی‌ای ثبت نشده است.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ۲۱. تغییر رمز عبور شخصی
+   ============================================================ */
+function ChangePasswordModal({ open, onClose }) {
+  const { data, update, session, notify } = useAppData();
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    const user = data.users.find(u => u.id === session.userId);
+    const curHash = await sha256Hex(current);
+    if (curHash !== user.passwordHash) { setError('رمز فعلی نادرست است.'); return; }
+    const errMsg = validatePasswordStrength(next);
+    if (errMsg) { setError(errMsg); return; }
+    if (next !== confirm) { setError('تکرار رمز جدید مطابقت ندارد.'); return; }
+    const newHash = await sha256Hex(next);
+    update(d => { const idx = d.users.findIndex(u => u.id === session.userId); d.users[idx].passwordHash = newHash; });
+    notify('رمز عبور با موفقیت تغییر کرد.', 'success');
+    setCurrent(''); setNext(''); setConfirm(''); setError('');
+    onClose();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="تغییر رمز عبور">
+      <div className="space-y-3">
+        <Field label="رمز فعلی"><input type="password" className={inputCls} value={current} onChange={e => setCurrent(e.target.value)} /></Field>
+        <Field label="رمز جدید" hint="حداقل ۶ کاراکتر و شامل حداقل یک رقم"><input type="password" className={inputCls} value={next} onChange={e => setNext(e.target.value)} /></Field>
+        <Field label="تکرار رمز جدید"><input type="password" className={inputCls} value={confirm} onChange={e => setConfirm(e.target.value)} /></Field>
+        {error && <div className="text-danger-700 bg-danger-50 rounded-lg px-3 py-2 text-sm">{error}</div>}
+        <button onClick={submit} className="w-full bg-brand-600 hover:bg-brand-700 text-white rounded-xl py-2.5 text-sm">ذخیره رمز جدید</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   ۲۱.۵ محول کردن وظیفه/چک‌لیست به کاربران دیگر (وظایف)
+   ============================================================ */
+function isAssignmentOverdue(a) {
+  if (!a || a.status !== 'pending' || !a.dueDate) return false;
+  try {
+    const parts = toEnglishDigits(a.dueDate).split('/').map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) return false;
+    const [gy, gm, gd] = toGregorian(parts[0], parts[1], parts[2]);
+    const due = new Date(gy, gm - 1, gd, 23, 59, 59);
+    return due.getTime() < Date.now();
+  } catch (e) { return false; }
+}
+
+function AssignmentForm({ users, assets, templates, onSave, onCancel }) {
+  const [assignedToUserId, setAssignedToUserId] = useState(users[0] ? users[0].id : '');
+  const [assetId, setAssetId] = useState(assets[0] ? assets[0].id : '');
+  const asset = assets.find(a => a.id === assetId);
+  const [templateId, setTemplateId] = useState(asset ? asset.templateId : (templates[0] ? templates[0].id : ''));
+  const [dueDate, setDueDate] = useState('');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => { if (asset) setTemplateId(asset.templateId); }, [assetId]);
+
+  const submit = () => {
+    if (!assignedToUserId || !assetId || !templateId) { setError('همه‌ی فیلدهای الزامی را تکمیل کنید.'); return; }
+    onSave({ assignedToUserId, assetId, templateId, dueDate, note: note.trim() });
+  };
+
+  return (
+    <div className="space-y-3">
+      <Field label="محول به کاربر">
+        <select className={inputCls} value={assignedToUserId} onChange={e => setAssignedToUserId(e.target.value)}>
+          {users.map(u => <option key={u.id} value={u.id}>{u.name} — {ROLE_LABELS[u.role]}</option>)}
+        </select>
+      </Field>
+      <Field label="تجهیز">
+        <select className={inputCls} value={assetId} onChange={e => setAssetId(e.target.value)}>
+          {assets.map(a => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+        </select>
+      </Field>
+      <Field label="قالب چک‌لیست">
+        <select className={inputCls} value={templateId} onChange={e => setTemplateId(e.target.value)}>
+          {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </Field>
+      <Field label="مهلت انجام (اختیاری)">
+        <PersianDatePicker value={dueDate} onChange={setDueDate} placeholder="انتخاب تاریخ" />
+      </Field>
+      <Field label="یادداشت برای انجام‌دهنده (اختیاری)">
+        <textarea className={inputCls} rows={2} value={note} onChange={e => setNote(e.target.value)} />
+      </Field>
+      {error && <div className="text-danger-700 bg-danger-50 rounded-lg px-3 py-2 text-sm">{error}</div>}
+      <div className="flex gap-2 justify-end pt-2">
+        <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm text-slate-600 hover:bg-slate-100">انصراف</button>
+        <button onClick={submit} className="px-4 py-2 rounded-xl text-sm text-white bg-brand-600 hover:bg-brand-700">واگذاری وظیفه</button>
+      </div>
+    </div>
+  );
+}
+
+function TasksPage({ goRunner }) {
+  const { data, update, currentUser, notify } = useAppData();
+  const canManage = currentUser.role === 'admin' || currentUser.role === 'manager';
+  const [showForm, setShowForm] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const userName = (id) => (data.users.find(u => u.id === id) || {}).name || '—';
+  const assetLabel = (id) => { const a = data.assets.find(x => x.id === id); return a ? `${a.code} — ${a.name}` : '—'; };
+  const templateName = (id) => (data.templates.find(t => t.id === id) || {}).name || '—';
+
+  const assignTask = (payload) => {
+    update(d => {
+      d.assignments.unshift({
+        id: 'asg-' + Date.now(), ...payload, status: 'pending',
+        createdBy: currentUser.id, createdAt: new Date().toISOString(), recordId: null,
+      });
+    });
+    setShowForm(false);
+    notify('وظیفه با موفقیت واگذار شد.', 'success');
+  };
+
+  const deleteTask = (a) => {
+    update(d => { d.assignments = d.assignments.filter(x => x.id !== a.id); });
+    setConfirmDel(null);
+    notify('وظیفه حذف شد.', 'success');
+  };
+
+  const toggleDone = (a) => {
+    update(d => {
+      const idx = d.assignments.findIndex(x => x.id === a.id);
+      if (idx > -1) d.assignments[idx].status = d.assignments[idx].status === 'done' ? 'pending' : 'done';
+    });
+  };
+
+  const statusBadge = (a) => {
+    if (a.status === 'done') return <Badge tone="ok">انجام شد</Badge>;
+    if (isAssignmentOverdue(a)) return <Badge tone="danger">دیرکرد</Badge>;
+    return <Badge tone="warn">در انتظار انجام</Badge>;
+  };
+
+  const myTasks = data.assignments.filter(a => a.assignedToUserId === currentUser.id)
+    .slice().sort((x, y) => (x.status === 'done') - (y.status === 'done'));
+  const allTasks = data.assignments;
+
+  const activeUsers = data.users.filter(u => u.active !== false);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">وظایف</h2>
+          <p className="text-sm text-slate-500">واگذاری چک‌لیست به کاربران دیگر و پیگیری وضعیت انجام آن</p>
+        </div>
+        {canManage && (
+          <button onClick={() => setShowForm(true)} className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium">+ واگذاری وظیفه جدید</button>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200">
+        <div className="p-4 border-b border-slate-100 font-bold text-slate-800 text-sm">وظایف من</div>
+        <div className="divide-y divide-slate-100">
+          {myTasks.map(a => (
+            <div key={a.id} className="p-4 flex items-center justify-between gap-3 text-sm">
+              <div className="min-w-0">
+                <p className="font-medium text-slate-800 truncate">{assetLabel(a.assetId)} — {templateName(a.templateId)}</p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {a.dueDate ? `مهلت: ${toPersianDigits(a.dueDate)}` : 'بدون مهلت مشخص'}
+                  {a.note ? ` · ${a.note}` : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {statusBadge(a)}
+                {a.status !== 'done' && (
+                  <button onClick={() => goRunner(a.assetId, a.id)} className="text-xs bg-brand-600 hover:bg-brand-700 text-white rounded-lg px-2.5 py-1.5">اجرای چک‌لیست</button>
+                )}
+              </div>
+            </div>
+          ))}
+          {myTasks.length === 0 && <p className="p-6 text-center text-slate-400 text-sm">در حال حاضر وظیفه‌ای برای شما ثبت نشده است.</p>}
+        </div>
+      </div>
+
+      {canManage && (
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
+          <div className="p-4 border-b border-slate-100 font-bold text-slate-800 text-sm">همه‌ی وظایف (مدیریت)</div>
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="p-3 text-right">تجهیز</th><th className="p-3 text-right">قالب</th><th className="p-3 text-right">محول به</th><th className="p-3 text-right">مهلت</th><th className="p-3 text-right">وضعیت</th><th className="p-3 text-right">عملیات</th></tr>
+            </thead>
+            <tbody>
+              {allTasks.map(a => (
+                <tr key={a.id} className="border-t border-slate-100">
+                  <td className="p-3">{assetLabel(a.assetId)}</td>
+                  <td className="p-3">{templateName(a.templateId)}</td>
+                  <td className="p-3">{userName(a.assignedToUserId)}</td>
+                  <td className="p-3">{a.dueDate ? toPersianDigits(a.dueDate) : '—'}</td>
+                  <td className="p-3">{statusBadge(a)}</td>
+                  <td className="p-3 flex gap-1.5">
+                    <button onClick={() => toggleDone(a)} className="text-xs bg-slate-100 hover:bg-slate-200 rounded-lg px-2.5 py-1.5">
+                      {a.status === 'done' ? 'بازگشایی' : 'انجام‌شده'}
+                    </button>
+                    <button onClick={() => setConfirmDel(a)} className="text-xs bg-danger-50 text-danger-700 hover:bg-danger-100 rounded-lg px-2.5 py-1.5">حذف</button>
+                  </td>
+                </tr>
+              ))}
+              {allTasks.length === 0 && <tr><td colSpan={6} className="p-6 text-center text-slate-400 text-sm">هنوز وظیفه‌ای ثبت نشده است.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {canManage && (
+        <Modal open={showForm} onClose={() => setShowForm(false)} title="واگذاری وظیفه جدید" wide>
+          <AssignmentForm users={activeUsers} assets={data.assets} templates={data.templates} onSave={assignTask} onCancel={() => setShowForm(false)} />
+        </Modal>
+      )}
+
+      <ConfirmDialog open={!!confirmDel} title="حذف وظیفه" danger
+        message="این وظیفه برای همیشه حذف می‌شود. ادامه می‌دهید؟"
+        onConfirm={() => deleteTask(confirmDel)} onCancel={() => setConfirmDel(null)} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۲۲. پوسته اصلی برنامه (منو، ناوبری، پنهان‌سازی بر اساس نقش)
+   ============================================================ */
+const NAV_ITEMS = [
+  { key: 'dashboard', label: 'داشبورد', icon: '🏠' },
+  { key: 'runner', label: 'اجرای بازرسی', icon: '📝' },
+  { key: 'assets', label: 'تجهیزات', icon: '🗄️' },
+  { key: 'records', label: 'سوابق', icon: '📊' },
+  { key: 'templates', label: 'قالب‌های چک‌لیست', icon: '📋' },
+  { key: 'tasks', label: 'وظایف', icon: '🗒️' },
+  { key: 'users', label: 'کاربران', icon: '👥' },
+  { key: 'settings', label: 'تنظیمات', icon: '⚙️' },
+  { key: 'help', label: 'راهنما', icon: '❓' },
+];
+
+function AppShell() {
+  const { currentUser, logout, data } = useAppData();
+  const [page, setPage] = useState('dashboard');
+  const [runnerAssetId, setRunnerAssetId] = useState(null);
+  const [runnerAssignmentId, setRunnerAssignmentId] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showPwModal, setShowPwModal] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const myPages = useMemo(() => effectivePages(currentUser), [currentUser]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const scan = params.get('scan');
+    if (scan && myPages.includes('runner')) {
+      const asset = data.assets.find(a => a.id === scan || a.code === scan);
+      if (asset) { setRunnerAssetId(asset.id); setPage('runner'); }
+    }
+    // eslint-disable-next-line
+  }, []);
+
+  const visibleNav = NAV_ITEMS.filter(n => myPages.includes(n.key));
+  const goPage = (p) => { if (!myPages.includes(p)) return; setPage(p); setSidebarOpen(false); };
+  const goRunner = (assetId, assignmentId) => {
+    if (!myPages.includes('runner')) return;
+    setRunnerAssetId(assetId); setRunnerAssignmentId(assignmentId || null); setPage('runner'); setSidebarOpen(false);
+  };
+
+  let content;
+  if (page === 'dashboard') content = <DashboardPage goPage={goPage} goRunner={goRunner} />;
+  else if (page === 'runner') content = <RunnerPage assetId={runnerAssetId} assignmentId={runnerAssignmentId} onFinish={() => goPage('records')} />;
+  else if (page === 'assets') content = <AssetsPage goRunner={goRunner} />;
+  else if (page === 'records') content = <RecordsPage />;
+  else if (page === 'templates') content = <TemplatesPage />;
+  else if (page === 'tasks') content = <TasksPage goRunner={goRunner} />;
+  else if (page === 'users') content = <UsersPage />;
+  else if (page === 'settings') content = <SettingsPage />;
+  else if (page === 'help') content = <HelpPage />;
+  else content = <DashboardPage goPage={goPage} goRunner={goRunner} />;
+
+  return (
+    <div className="min-h-screen flex">
+      {sidebarOpen && <div className="fixed inset-0 bg-slate-900/40 z-30 sm:hidden no-print" onClick={() => setSidebarOpen(false)}></div>}
+
+      <aside className={
+        "no-print fixed sm:sticky top-0 h-screen w-64 bg-slate-900 text-slate-300 z-40 transition-transform duration-200 " +
+        (sidebarOpen ? "translate-x-0" : "translate-x-full sm:translate-x-0")
+      } style={{ right: 0 }}>
+        <div className="p-5 border-b border-white/10">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-brand-600 flex items-center justify-center text-white font-bold">د</div>
+            <div>
+              <p className="text-white font-bold text-sm leading-tight">چک‌لیست درکاو</p>
+              <p className="text-xs text-slate-500">{data.settings.orgName}</p>
+            </div>
+          </div>
+        </div>
+        <nav className="p-3 space-y-1">
+          {visibleNav.map(n => (
+            <button key={n.key} onClick={() => goPage(n.key)}
+              className={"w-full text-right flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-sm transition " +
+                (page === n.key ? "bg-brand-600 text-white" : "hover:bg-white/5 text-slate-300")}>
+              <span>{n.icon}</span>{n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="absolute bottom-0 inset-x-0 p-3 border-t border-white/10">
+          <button onClick={logout} className="w-full text-right px-3.5 py-2.5 rounded-xl text-sm text-slate-300 hover:bg-white/5 flex items-center gap-2.5">
+            <span>🚪</span>خروج از حساب
+          </button>
+        </div>
+      </aside>
+
+      <div className="flex-1 min-w-0">
+        <header className="no-print sticky top-0 z-20 bg-white/80 backdrop-blur border-b border-slate-200 flex items-center justify-between px-4 sm:px-6 py-3">
+          <button onClick={() => setSidebarOpen(true)} className="sm:hidden w-9 h-9 rounded-lg hover:bg-slate-100">☰</button>
+          <h1 className="font-bold text-slate-800 hidden sm:block">{visibleNav.find(n => n.key === page)?.label}</h1>
+          <div className="relative">
+            <button onClick={() => setShowUserMenu(s => !s)} className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-slate-100">
+              <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-xs font-bold">{currentUser.name?.[0] || '?'}</span>
+              <span className="text-sm text-slate-700 hidden sm:inline">{currentUser.name}</span>
+              <Badge tone="brand">{ROLE_LABELS[currentUser.role]}</Badge>
+            </button>
+            {showUserMenu && (
+              <div className="absolute left-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-lg w-48 py-1.5 z-30">
+                <button onClick={() => { setShowPwModal(true); setShowUserMenu(false); }} className="w-full text-right px-4 py-2 text-sm hover:bg-slate-50">تغییر رمز عبور</button>
+                <button onClick={logout} className="w-full text-right px-4 py-2 text-sm hover:bg-slate-50 text-danger-600">خروج</button>
+              </div>
+            )}
+          </div>
+        </header>
+        <main className="p-4 sm:p-6">{content}</main>
+      </div>
+
+      <ChangePasswordModal open={showPwModal} onClose={() => setShowPwModal(false)} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ۲۳. ریشه برنامه و راه‌اندازی
+   ============================================================ */
+function Root() {
+  const { session } = useAppData();
+  return session ? <AppShell /> : <LoginScreen />;
+}
+
+function App() {
+  return (
+    <DataProvider>
+      <Root />
+    </DataProvider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+
+<!--
+  توضیح فنی: بلوک بالا با type="text/plain" علامت‌گذاری شده تا مرورگر آن را مستقیم اجرا نکند.
+  اسکریپت زیر آن را با Babel و «runtime کلاسیک» (React.createElement) کامپایل می‌کند؛
+  این کار به‌عمد به‌جای ترنسفورم خودکار Babel Standalone انجام می‌شود، چون حالت
+  پیش‌فرض جدید Babel («automatic» JSX runtime) به ماژول react/jsx-runtime نیاز دارد
+  که در بارگذاری ساده React از طریق تگ <script> (UMD/global) در دسترس نیست.
+-->
+<script>
+  (function () {
+    const source = document.getElementById('app-source').textContent;
+    const output = Babel.transform(source, {
+      presets: [
+        ['react', { runtime: 'classic' }],
+        ['env', { modules: false }],
+      ],
+      filename: 'app.jsx',
+    }).code;
+    const scriptEl = document.createElement('script');
+    scriptEl.textContent = output;
+    document.body.appendChild(scriptEl);
+  })();
+</script>
+</body>
+</html>
